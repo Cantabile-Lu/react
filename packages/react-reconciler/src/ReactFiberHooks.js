@@ -496,6 +496,9 @@ function areHookInputsEqual(
   return true;
 }
 
+/**
+ * @description 所有函数式组件触发函数
+ */
 export function renderWithHooks<Props, SecondArg>(
   current: Fiber | null,
   workInProgress: Fiber,
@@ -518,7 +521,9 @@ export function renderWithHooks<Props, SecondArg>(
       current !== null && current.type !== workInProgress.type;
   }
 
+  // 存放hooks信息, 如果是类组件, 则存放state信息
   workInProgress.memoizedState = null;
+  // 更新队列, 用于存放useEffect产生副作用的链表
   workInProgress.updateQueue = null;
   workInProgress.lanes = NoLanes;
 
@@ -552,6 +557,7 @@ export function renderWithHooks<Props, SecondArg>(
       ReactCurrentDispatcher.current = HooksDispatcherOnMountInDEV;
     }
   } else {
+    // 判断走更新流程还是挂载流程
     ReactCurrentDispatcher.current =
       current === null || current.memoizedState === null
         ? HooksDispatcherOnMount
@@ -950,13 +956,13 @@ export function resetHooksOnUnwind(workInProgress: Fiber): void {
 
 function mountWorkInProgressHook(): Hook {
   const hook: Hook = {
-    memoizedState: null,
+    memoizedState: null, // 保存不同的hook 的信息
 
-    baseState: null,
-    baseQueue: null,
-    queue: null,
+    baseState: null, // 数据发生改变, 保存最新的值
+    baseQueue: null, // 保存最新的队列
+    queue: null, // 保存待更新的队列
 
-    next: null,
+    next: null, // 指向下一个hook
   };
 
   if (workInProgressHook === null) {
@@ -1731,11 +1737,13 @@ function forceStoreRerender(fiber: Fiber) {
 }
 
 function mountStateImpl<S>(initialState: (() => S) | S): Hook {
+  // 生成一个hook对象
   const hook = mountWorkInProgressHook();
   if (typeof initialState === 'function') {
     // $FlowFixMe[incompatible-use]: Flow doesn't like mixed types
     initialState = initialState();
   }
+  // 将初始值复制给hook对象
   hook.memoizedState = hook.baseState = initialState;
   const queue: UpdateQueue<S, BasicStateAction<S>> = {
     pending: null,
@@ -1753,6 +1761,7 @@ function mountState<S>(
 ): [S, Dispatch<BasicStateAction<S>>] {
   const hook = mountStateImpl(initialState);
   const queue = hook.queue;
+  // 定义dispatch函数
   const dispatch: Dispatch<BasicStateAction<S>> = (dispatchSetState.bind(
     null,
     currentlyRenderingFiber,
@@ -3157,7 +3166,7 @@ function dispatchReducerAction<S, A>(
 function dispatchSetState<S, A>(
   fiber: Fiber,
   queue: UpdateQueue<S, A>,
-  action: A,
+  action: A, // 真实传入的参数
 ): void {
   if (__DEV__) {
     if (typeof arguments[3] === 'function') {
@@ -3170,7 +3179,7 @@ function dispatchSetState<S, A>(
   }
 
   const lane = requestUpdateLane(fiber);
-
+  // 用于记录更新信息
   const update: Update<S, A> = {
     lane,
     revertLane: NoLane,
@@ -3179,10 +3188,11 @@ function dispatchSetState<S, A>(
     eagerState: null,
     next: (null: any),
   };
-
+  // 判断是否在渲染阶段
   if (isRenderPhaseUpdate(fiber)) {
     enqueueRenderPhaseUpdate(queue, update);
   } else {
+    // 获取最新state值
     const alternate = fiber.alternate;
     if (
       fiber.lanes === NoLanes &&
@@ -3208,6 +3218,7 @@ function dispatchSetState<S, A>(
           // without calling the reducer again.
           update.hasEagerState = true;
           update.eagerState = eagerState;
+          // Object.is判断两个值是否相同
           if (is(eagerState, currentState)) {
             // Fast path. We can bail out without scheduling React to re-render.
             // It's still possible that we'll need to rebase this update later,
@@ -3226,9 +3237,11 @@ function dispatchSetState<S, A>(
         }
       }
     }
-
+    // 将root插入链表内部
     const root = enqueueConcurrentHookUpdate(fiber, queue, update, lane);
     if (root !== null) {
+      // 对应节点更新
+      // 渲染更新的主要函数
       scheduleUpdateOnFiber(root, fiber, lane);
       entangleTransitionUpdate(root, queue, lane);
     }

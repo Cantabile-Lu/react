@@ -3999,6 +3999,13 @@ function attemptEarlyBailoutIfNoScheduledUpdate(
   return bailoutOnAlreadyFinishedWork(current, workInProgress, renderLanes);
 }
 
+/**
+ * @description 整个流程的开始
+ * @params current 在视图层渲染的树
+ * @params workInProgress:  整个内存中所构建的 Fiber；树，所有的更新都发生在 workInProgress
+ * 中，所以这个树是最新状态的，之后它将替换给 current；
+ * @params renderLanes: 优先级
+ */
 function beginWork(
   current: Fiber | null,
   workInProgress: Fiber,
