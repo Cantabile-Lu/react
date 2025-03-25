@@ -8,14 +8,10 @@
  */
 
 import type {Fiber} from './ReactInternalTypes';
-import type {Container, SuspenseInstance} from './ReactFiberConfig';
+import type {Container, SuspenseInstance, Instance} from './ReactFiberConfig';
 import type {SuspenseState} from './ReactFiberSuspenseComponent';
 
-import {get as getInstance} from 'shared/ReactInstanceMap';
-import ReactSharedInternals from 'shared/ReactSharedInternals';
-import getComponentNameFromFiber from 'react-reconciler/src/getComponentNameFromFiber';
 import {
-  ClassComponent,
   HostComponent,
   HostHoistable,
   HostSingleton,
@@ -23,11 +19,9 @@ import {
   HostPortal,
   HostText,
   SuspenseComponent,
+  OffscreenComponent,
 } from './ReactWorkTags';
 import {NoFlags, Placement, Hydrating} from './ReactFiberFlags';
-import {enableFloat, enableHostSingletons} from 'shared/ReactFeatureFlags';
-
-const ReactCurrentOwner = ReactSharedInternals.ReactCurrentOwner;
 
 export function getNearestMountedFiber(fiber: Fiber): null | Fiber {
   let node = fiber;
@@ -84,37 +78,6 @@ export function getContainerFromFiber(fiber: Fiber): null | Container {
   return fiber.tag === HostRoot
     ? (fiber.stateNode.containerInfo: Container)
     : null;
-}
-
-export function isFiberMounted(fiber: Fiber): boolean {
-  return getNearestMountedFiber(fiber) === fiber;
-}
-
-export function isMounted(component: React$Component<any, any>): boolean {
-  if (__DEV__) {
-    const owner = (ReactCurrentOwner.current: any);
-    if (owner !== null && owner.tag === ClassComponent) {
-      const ownerFiber: Fiber = owner;
-      const instance = ownerFiber.stateNode;
-      if (!instance._warnedAboutRefsInRender) {
-        console.error(
-          '%s is accessing isMounted inside its render() function. ' +
-            'render() should be a pure function of props and state. It should ' +
-            'never access something that requires stale data from the previous ' +
-            'render, such as refs. Move this logic to componentDidMount and ' +
-            'componentDidUpdate instead.',
-          getComponentNameFromFiber(ownerFiber) || 'A component',
-        );
-      }
-      instance._warnedAboutRefsInRender = true;
-    }
-  }
-
-  const fiber: ?Fiber = getInstance(component);
-  if (!fiber) {
-    return false;
-  }
-  return getNearestMountedFiber(fiber) === fiber;
 }
 
 function assertIsMounted(fiber: Fiber) {
@@ -280,8 +243,8 @@ function findCurrentHostFiberImpl(node: Fiber): Fiber | null {
   const tag = node.tag;
   if (
     tag === HostComponent ||
-    (enableFloat ? tag === HostHoistable : false) ||
-    (enableHostSingletons ? tag === HostSingleton : false) ||
+    tag === HostHoistable ||
+    tag === HostSingleton ||
     tag === HostText
   ) {
     return node;
@@ -311,8 +274,8 @@ function findCurrentHostFiberWithNoPortalsImpl(node: Fiber): Fiber | null {
   const tag = node.tag;
   if (
     tag === HostComponent ||
-    (enableFloat ? tag === HostHoistable : false) ||
-    (enableHostSingletons ? tag === HostSingleton : false) ||
+    tag === HostHoistable ||
+    tag === HostSingleton ||
     tag === HostText
   ) {
     return node;
@@ -354,4 +317,53 @@ export function doesFiberContain(
     node = node.return;
   }
   return false;
+}
+
+export function traverseFragmentInstance<A, B, C>(
+  fragmentFiber: Fiber,
+  fn: (Instance, A, B, C) => boolean,
+  a: A,
+  b: B,
+  c: C,
+): void {
+  traverseFragmentInstanceChildren(fragmentFiber.child, fn, a, b, c);
+}
+
+function traverseFragmentInstanceChildren<A, B, C>(
+  child: Fiber | null,
+  fn: (Instance, A, B, C) => boolean,
+  a: A,
+  b: B,
+  c: C,
+): void {
+  while (child !== null) {
+    if (child.tag === HostComponent) {
+      if (fn(child.stateNode, a, b, c)) {
+        return;
+      }
+    } else if (
+      child.tag === OffscreenComponent &&
+      child.memoizedState !== null
+    ) {
+      // Skip hidden subtrees
+    } else {
+      traverseFragmentInstanceChildren(child.child, fn, a, b, c);
+    }
+    child = child.sibling;
+  }
+}
+
+export function getFragmentParentHostInstance(fiber: Fiber): null | Instance {
+  let parent = fiber.return;
+  while (parent !== null) {
+    if (parent.tag === HostRoot) {
+      return parent.stateNode.containerInfo;
+    }
+    if (parent.tag === HostComponent) {
+      return parent.stateNode;
+    }
+    parent = parent.return;
+  }
+
+  return null;
 }

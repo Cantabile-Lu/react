@@ -57,8 +57,7 @@ let deadline = 0;
 
 let currentPriorityLevel_DEPRECATED = NormalPriority;
 
-// `isInputPending` is not available. Since we have no way of knowing if
-// there's pending input, always yield at the end of the frame.
+// Always yield at the end of the frame.
 export function unstable_shouldYield(): boolean {
   return getCurrentTime() >= deadline;
 }
@@ -129,15 +128,9 @@ function runTask<T>(
     if (typeof result === 'function') {
       // Assume this is a continuation
       const continuation: SchedulerCallback<T> = (result: any);
-      const continuationController = new TaskController({
-        priority: postTaskPriority,
-      });
       const continuationOptions = {
-        signal: continuationController.signal,
+        signal: node._controller.signal,
       };
-      // Update the original callback node's controller, since even though we're
-      // posting a new task, conceptually it's the same one.
-      node._controller = continuationController;
 
       const nextTask = runTask.bind(
         null,
@@ -240,14 +233,6 @@ export function unstable_wrapCallback<T>(callback: () => T): () => T {
 }
 
 export function unstable_forceFrameRate() {}
-
-export function unstable_pauseExecution() {}
-
-export function unstable_continueExecution() {}
-
-export function unstable_getFirstCallbackNode(): null {
-  return null;
-}
 
 // Currently no profiling build
 export const unstable_Profiling = null;

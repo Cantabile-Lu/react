@@ -19,6 +19,7 @@ let waitForAll;
 let waitFor;
 let waitForMicrotasks;
 let assertLog;
+let assertConsoleErrorDev;
 
 const setUntrackedInputValue = Object.getOwnPropertyDescriptor(
   HTMLInputElement.prototype,
@@ -34,6 +35,8 @@ describe('ReactDOMFiberAsync', () => {
     ReactDOM = require('react-dom');
     ReactDOMClient = require('react-dom/client');
     act = require('internal-test-utils').act;
+    assertConsoleErrorDev =
+      require('internal-test-utils').assertConsoleErrorDev;
     Scheduler = require('scheduler');
 
     const InternalTestUtils = require('internal-test-utils');
@@ -50,7 +53,8 @@ describe('ReactDOMFiberAsync', () => {
     document.body.removeChild(container);
   });
 
-  it('renders synchronously by default', () => {
+  // @gate !disableLegacyMode
+  it('renders synchronously by default in legacy mode', () => {
     const ops = [];
     ReactDOM.render(<div>Hi</div>, container, () => {
       ops.push(container.textContent);
@@ -61,12 +65,16 @@ describe('ReactDOMFiberAsync', () => {
     expect(ops).toEqual(['Hi', 'Bye']);
   });
 
-  it('flushSync batches sync updates and flushes them at the end of the batch', () => {
+  it('flushSync batches sync updates and flushes them at the end of the batch', async () => {
     const ops = [];
     let instance;
 
     class Component extends React.Component {
       state = {text: ''};
+      componentDidMount() {
+        instance = this;
+      }
+
       push(val) {
         this.setState(state => ({text: state.text + val}));
       }
@@ -79,9 +87,13 @@ describe('ReactDOMFiberAsync', () => {
       }
     }
 
-    ReactDOM.render(<Component />, container);
+    const root = ReactDOMClient.createRoot(container);
+    await act(() => root.render(<Component />));
 
-    instance.push('A');
+    await act(() => {
+      instance.push('A');
+    });
+
     expect(ops).toEqual(['A']);
     expect(container.textContent).toEqual('A');
 
@@ -92,19 +104,26 @@ describe('ReactDOMFiberAsync', () => {
       expect(container.textContent).toEqual('A');
       expect(ops).toEqual(['A']);
     });
+
     expect(container.textContent).toEqual('ABC');
     expect(ops).toEqual(['A', 'ABC']);
-    instance.push('D');
+    await act(() => {
+      instance.push('D');
+    });
     expect(container.textContent).toEqual('ABCD');
     expect(ops).toEqual(['A', 'ABC', 'ABCD']);
   });
 
-  it('flushSync flushes updates even if nested inside another flushSync', () => {
+  it('flushSync flushes updates even if nested inside another flushSync', async () => {
     const ops = [];
     let instance;
 
     class Component extends React.Component {
       state = {text: ''};
+      componentDidMount() {
+        instance = this;
+      }
+
       push(val) {
         this.setState(state => ({text: state.text + val}));
       }
@@ -117,9 +136,12 @@ describe('ReactDOMFiberAsync', () => {
       }
     }
 
-    ReactDOM.render(<Component />, container);
+    const root = ReactDOMClient.createRoot(container);
+    await act(() => root.render(<Component />));
 
-    instance.push('A');
+    await act(() => {
+      instance.push('A');
+    });
     expect(ops).toEqual(['A']);
     expect(container.textContent).toEqual('A');
 
@@ -141,7 +163,7 @@ describe('ReactDOMFiberAsync', () => {
     expect(ops).toEqual(['A', 'ABCD']);
   });
 
-  it('flushSync logs an error if already performing work', () => {
+  it('flushSync logs an error if already performing work', async () => {
     class Component extends React.Component {
       componentDidUpdate() {
         ReactDOM.flushSync();
@@ -152,11 +174,20 @@ describe('ReactDOMFiberAsync', () => {
     }
 
     // Initial mount
-    ReactDOM.render(<Component />, container);
+    const root = ReactDOMClient.createRoot(container);
+    await act(() => {
+      root.render(<Component />);
+    });
     // Update
-    expect(() => ReactDOM.render(<Component />, container)).toErrorDev(
-      'flushSync was called from inside a lifecycle method',
-    );
+    ReactDOM.flushSync(() => {
+      root.render(<Component />);
+    });
+    assertConsoleErrorDev([
+      'flushSync was called from inside a lifecycle method. ' +
+        'React cannot flush when React is already rendering. ' +
+        'Consider moving this call to a scheduler task or micro task.\n' +
+        '    in Component (at **)',
+    ]);
   });
 
   describe('concurrent mode', () => {
@@ -289,21 +320,12 @@ describe('ReactDOMFiberAsync', () => {
         assertLog([]);
       });
       // Only the active updates have flushed
-      if (gate(flags => flags.enableUnifiedSyncLane)) {
-        expect(container.textContent).toEqual('ABC');
-        assertLog(['ABC']);
-      } else {
-        expect(container.textContent).toEqual('BC');
-        assertLog(['BC']);
-      }
+      expect(container.textContent).toEqual('ABC');
+      assertLog(['ABC']);
 
       await act(() => {
         instance.push('D');
-        if (gate(flags => flags.enableUnifiedSyncLane)) {
-          expect(container.textContent).toEqual('ABC');
-        } else {
-          expect(container.textContent).toEqual('BC');
-        }
+        expect(container.textContent).toEqual('ABC');
         assertLog([]);
       });
       assertLog(['ABCD']);
@@ -492,11 +514,14 @@ describe('ReactDOMFiberAsync', () => {
     const containerA = document.createElement('div');
     const containerB = document.createElement('div');
     const containerC = document.createElement('div');
+    const rootA = ReactDOMClient.createRoot(containerA);
+    const rootB = ReactDOMClient.createRoot(containerB);
+    const rootC = ReactDOMClient.createRoot(containerC);
 
     await act(() => {
-      ReactDOM.render(<App label="A" />, containerA);
-      ReactDOM.render(<App label="B" />, containerB);
-      ReactDOM.render(<App label="C" />, containerC);
+      rootA.render(<App label="A" />);
+      rootB.render(<App label="B" />);
+      rootC.render(<App label="C" />);
     });
 
     expect(containerA.textContent).toEqual('Finished');
@@ -726,7 +751,7 @@ describe('ReactDOMFiberAsync', () => {
       // Because it suspended, it remains on the current path
       expect(div.textContent).toBe('/path/a');
     });
-    assertLog(['Suspend! [/path/b]']);
+    assertLog(gate('enableSiblingPrerendering') ? ['Suspend! [/path/b]'] : []);
 
     await act(async () => {
       resolvePromise();

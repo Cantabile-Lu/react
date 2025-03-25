@@ -7,8 +7,6 @@
  * @flow
  */
 
-import type {HostDispatcher} from 'react-dom/src/shared/ReactDOMTypes';
-import type {EventPriority} from 'react-reconciler/src/ReactEventPriorities';
 import type {DOMEventName} from '../events/DOMEventNames';
 import type {Fiber, FiberRoot} from 'react-reconciler/src/ReactInternalTypes';
 import type {
@@ -16,7 +14,7 @@ import type {
   IntersectionObserverOptions,
   ObserveVisibleRectsCallback,
 } from 'react-reconciler/src/ReactTestSelectors';
-import type {ReactScopeInstance} from 'shared/ReactTypes';
+import type {ReactContext, ReactScopeInstance} from 'shared/ReactTypes';
 import type {AncestorInfoDev} from './validateDOMNesting';
 import type {FormStatus} from 'react-dom-bindings/src/shared/ReactDOMFormActions';
 import type {
@@ -27,16 +25,21 @@ import type {
   PreinitScriptOptions,
   PreinitModuleScriptOptions,
 } from 'react-dom/src/shared/ReactDOMTypes';
+import type {TransitionTypes} from 'react/src/ReactTransitionType.js';
 
-import {NotPending} from 'react-dom-bindings/src/shared/ReactDOMFormActions';
+import {NotPending} from '../shared/ReactDOMFormActions';
+
 import {getCurrentRootHostContainer} from 'react-reconciler/src/ReactFiberHostContext';
-import {DefaultEventPriority} from 'react-reconciler/src/ReactEventPriorities';
-// TODO: Remove this deep import when we delete the legacy root API
-import {ConcurrentMode, NoMode} from 'react-reconciler/src/ReactTypeOfMode';
 
 import hasOwnProperty from 'shared/hasOwnProperty';
 import {checkAttributeStringCoercion} from 'shared/CheckStringCoercion';
+import {REACT_CONTEXT_TYPE} from 'shared/ReactSymbols';
 
+export {
+  setCurrentUpdatePriority,
+  getCurrentUpdatePriority,
+  resolveUpdatePriority,
+} from './ReactDOMUpdatePriority';
 import {
   precacheFiberNode,
   updateFiberProps,
@@ -50,19 +53,22 @@ import {
   markNodeAsHoistable,
   isOwnedInstance,
 } from './ReactDOMComponentTree';
+import {
+  traverseFragmentInstance,
+  getFragmentParentHostInstance,
+} from 'react-reconciler/src/ReactFiberTreeReflection';
+
 export {detachDeletedInstance};
 import {hasRole} from './DOMAccessibilityRoles';
 import {
   setInitialProperties,
   updateProperties,
+  hydrateProperties,
+  hydrateText,
   diffHydratedProperties,
+  getPropsFromElement,
   diffHydratedText,
   trapClickOnNonInteractiveElement,
-  checkForUnmatchedText,
-  warnForDeletedHydratableElement,
-  warnForDeletedHydratableText,
-  warnForInsertedHydratedElement,
-  warnForInsertedHydratedText,
 } from './ReactDOMComponent';
 import {getSelectionInformation, restoreSelection} from './ReactInputSelection';
 import setTextContent from './setTextContent';
@@ -74,7 +80,6 @@ import {
 import {
   isEnabled as ReactBrowserEventEmitterIsEnabled,
   setEnabled as ReactBrowserEventEmitterSetEnabled,
-  getEventPriority,
 } from '../events/ReactDOMEventListener';
 import {SVG_NAMESPACE, MATH_NAMESPACE} from './DOMNamespaces';
 import {
@@ -91,11 +96,10 @@ import {retryIfBlockedOn} from '../events/ReactDOMEventReplaying';
 import {
   enableCreateEventHandleAPI,
   enableScopeAPI,
-  enableFloat,
-  enableHostSingletons,
   enableTrustedTypesIntegration,
-  enableFormActions,
-  enableAsyncActions,
+  disableLegacyMode,
+  enableMoveBefore,
+  disableCommentsAsDOMContainers,
 } from 'shared/ReactFeatureFlags';
 import {
   HostComponent,
@@ -106,6 +110,14 @@ import {
 import {listenToAllSupportedEvents} from '../events/DOMPluginEventSystem';
 import {validateLinkPropsForStyleResource} from '../shared/ReactDOMResourceValidation';
 import escapeSelectorAttributeValueInsideDoubleQuotes from './escapeSelectorAttributeValueInsideDoubleQuotes';
+import {flushSyncWork as flushSyncWorkOnAllRoots} from 'react-reconciler/src/ReactFiberWorkLoop';
+import {requestFormReset as requestFormResetOnFiber} from 'react-reconciler/src/ReactFiberHooks';
+
+import ReactDOMSharedInternals from 'shared/ReactDOMSharedInternals';
+
+export {default as rendererVersion} from 'shared/ReactVersion';
+export const rendererPackageName = 'react-dom';
+export const extraDevToolsConfig = null;
 
 export type Type = string;
 export type Props = {
@@ -115,7 +127,14 @@ export type Props = {
   hidden?: boolean,
   suppressHydrationWarning?: boolean,
   dangerouslySetInnerHTML?: mixed,
-  style?: {display?: string, ...},
+  style?: {
+    display?: string,
+    viewTransitionName?: string,
+    'view-transition-name'?: string,
+    viewTransitionClass?: string,
+    'view-transition-class'?: string,
+    ...
+  },
   bottom?: null | number,
   left?: null | number,
   right?: null | number,
@@ -144,6 +163,7 @@ export type EventTargetChildElement = {
   },
   ...
 };
+
 export type Container =
   | interface extends Element {_reactRootContainer?: FiberRoot}
   | interface extends Document {_reactRootContainer?: FiberRoot}
@@ -174,6 +194,14 @@ export type RendererInspectionConfig = $ReadOnly<{}>;
 
 export type TransitionStatus = FormStatus;
 
+export type ViewTransitionInstance = {
+  name: string,
+  group: Animatable,
+  imagePair: Animatable,
+  old: Animatable,
+  new: Animatable,
+};
+
 type SelectionInformation = {
   focusedElem: null | HTMLElement,
   selectionRange: mixed,
@@ -185,8 +213,13 @@ const SUSPENSE_START_DATA = '$';
 const SUSPENSE_END_DATA = '/$';
 const SUSPENSE_PENDING_START_DATA = '$?';
 const SUSPENSE_FALLBACK_START_DATA = '$!';
+const PREAMBLE_CONTRIBUTION_HTML = 0b001;
+const PREAMBLE_CONTRIBUTION_BODY = 0b010;
+const PREAMBLE_CONTRIBUTION_HEAD = 0b100;
 const FORM_STATE_IS_MATCHING = 'F!';
 const FORM_STATE_IS_NOT_MATCHING = 'F';
+
+const DOCUMENT_READY_STATE_COMPLETE = 'complete';
 
 const STYLE = 'style';
 
@@ -231,7 +264,7 @@ export function getRootHostContext(
     }
     default: {
       const container: any =
-        nodeType === COMMENT_NODE
+        !disableCommentsAsDOMContainers && nodeType === COMMENT_NODE
           ? rootContainerInstance.parentNode
           : rootContainerInstance;
       type = container.tagName;
@@ -320,7 +353,7 @@ export function getPublicInstance(instance: Instance): Instance {
 
 export function prepareForCommit(containerInfo: Container): Object | null {
   eventsEnabled = ReactBrowserEventEmitterIsEnabled();
-  selectionInformation = getSelectionInformation();
+  selectionInformation = getSelectionInformation(containerInfo);
   let activeInstance = null;
   if (enableCreateEventHandleAPI) {
     const focusedElem = selectionInformation.focusedElem;
@@ -352,7 +385,7 @@ export function afterActiveInstanceBlur(): void {
 }
 
 export function resetAfterCommit(containerInfo: Container): void {
-  restoreSelection(selectionInformation);
+  restoreSelection(selectionInformation, containerInfo);
   ReactBrowserEventEmitterSetEnabled(eventsEnabled);
   eventsEnabled = null;
   selectionInformation = null;
@@ -444,7 +477,7 @@ export function createInstance(
               didWarnScriptTags = true;
             }
           }
-          div.innerHTML = '<script><' + '/script>'; // eslint-disable-line
+          div.innerHTML = '<script><' + '/script>';
           // This is guaranteed to yield a script element.
           const firstChild = ((div.firstChild: any): HTMLScriptElement);
           domElement = div.removeChild(firstChild);
@@ -516,10 +549,18 @@ export function createInstance(
   return domElement;
 }
 
+export function cloneMutableInstance(
+  instance: Instance,
+  keepChildren: boolean,
+): Instance {
+  return instance.cloneNode(keepChildren);
+}
+
 export function appendInitialChild(
   parentInstance: Instance,
   child: Instance | TextInstance,
 ): void {
+  // Note: This should not use moveBefore() because initial are appended while disconnected.
   parentInstance.appendChild(child);
 }
 
@@ -549,6 +590,7 @@ export function shouldSetTextContent(type: string, props: Props): boolean {
     type === 'noscript' ||
     typeof props.children === 'string' ||
     typeof props.children === 'number' ||
+    typeof props.children === 'bigint' ||
     (typeof props.dangerouslySetInnerHTML === 'object' &&
       props.dangerouslySetInnerHTML !== null &&
       props.dangerouslySetInnerHTML.__html != null)
@@ -565,7 +607,11 @@ export function createTextInstance(
     const hostContextDev = ((hostContext: any): HostContextDev);
     const ancestor = hostContextDev.ancestorInfo.current;
     if (ancestor != null) {
-      validateTextNesting(text, ancestor.tag);
+      validateTextNesting(
+        text,
+        ancestor.tag,
+        hostContextDev.ancestorInfo.implicitRootScope,
+      );
     }
   }
   const textNode: TextInstance = getOwnerDocumentFromRootContainer(
@@ -575,12 +621,10 @@ export function createTextInstance(
   return textNode;
 }
 
-export function getCurrentEventPriority(): EventPriority {
-  const currentEvent = window.event;
-  if (currentEvent === undefined) {
-    return DefaultEventPriority;
-  }
-  return getEventPriority(currentEvent.type);
+export function cloneMutableTextInstance(
+  textInstance: TextInstance,
+): TextInstance {
+  return textInstance.cloneNode(false);
 }
 
 let currentPopstateTransitionEvent: Event | null = null;
@@ -608,6 +652,21 @@ export function shouldAttemptEagerTransition(): boolean {
   return false;
 }
 
+let schedulerEvent: void | Event = undefined;
+export function trackSchedulerEvent(): void {
+  schedulerEvent = window.event;
+}
+
+export function resolveEventType(): null | string {
+  const event = window.event;
+  return event && event !== schedulerEvent ? event.type : null;
+}
+
+export function resolveEventTimeStamp(): number {
+  const event = window.event;
+  return event && event !== schedulerEvent ? event.timeStamp : -1.1;
+}
+
 export const isPrimaryRenderer = true;
 export const warnsIfNotActing = true;
 // This initialization code may run even on server environments
@@ -624,9 +683,7 @@ const localRequestAnimationFrame =
     ? requestAnimationFrame
     : scheduleTimeout;
 
-export function getInstanceFromNode(node: HTMLElement): null | Object {
-  return getClosestInstanceFromNode(node) || null;
-}
+export {getClosestInstanceFromNode as getInstanceFromNode};
 
 export function preparePortalMount(portalInstance: Instance): void {
   listenToAllSupportedEvents(portalInstance);
@@ -658,9 +715,9 @@ export const scheduleMicrotask: any =
   typeof queueMicrotask === 'function'
     ? queueMicrotask
     : typeof localPromise !== 'undefined'
-    ? callback =>
-        localPromise.resolve(null).then(callback).catch(handleErrorInNextTick)
-    : scheduleTimeout; // TODO: Determine the best fallback here.
+      ? callback =>
+          localPromise.resolve(null).then(callback).catch(handleErrorInNextTick)
+      : scheduleTimeout; // TODO: Determine the best fallback here.
 
 function handleErrorInNextTick(error: any) {
   setTimeout(() => {
@@ -700,8 +757,19 @@ export function commitMount(
       }
       return;
     case 'img': {
+      // The technique here is to assign the src or srcSet property to cause the browser
+      // to issue a new load event. If it hasn't loaded yet it'll fire whenever the load actually completes.
+      // If it has already loaded we missed it so the second load will still be the first one that executes
+      // any associated onLoad props.
+      // Even if we have srcSet we prefer to reassign src. The reason is that Firefox does not trigger a new
+      // load event when only srcSet is assigned. Chrome will trigger a load event if either is assigned so we
+      // only need to assign one. And Safari just never triggers a new load event which means this technique
+      // is already a noop regardless of which properties are assigned. We should revisit if browsers update
+      // this heuristic in the future.
       if ((newProps: any).src) {
         ((domElement: any): HTMLImageElement).src = (newProps: any).src;
+      } else if ((newProps: any).srcSet) {
+        ((domElement: any): HTMLImageElement).srcset = (newProps: any).srcSet;
       }
       return;
     }
@@ -710,7 +778,6 @@ export function commitMount(
 
 export function commitUpdate(
   domElement: Instance,
-  updatePayload: any,
   type: string,
   oldProps: Props,
   newProps: Props,
@@ -736,25 +803,55 @@ export function commitTextUpdate(
   textInstance.nodeValue = newText;
 }
 
+const supportsMoveBefore =
+  // $FlowFixMe[prop-missing]: We're doing the feature detection here.
+  enableMoveBefore &&
+  typeof window !== 'undefined' &&
+  typeof window.Element.prototype.moveBefore === 'function';
+
 export function appendChild(
   parentInstance: Instance,
   child: Instance | TextInstance,
 ): void {
-  parentInstance.appendChild(child);
+  if (supportsMoveBefore && child.parentNode !== null) {
+    // $FlowFixMe[prop-missing]: We've checked this with supportsMoveBefore.
+    parentInstance.moveBefore(child, null);
+  } else {
+    parentInstance.appendChild(child);
+  }
 }
 
 export function appendChildToContainer(
   container: Container,
   child: Instance | TextInstance,
 ): void {
-  let parentNode;
-  if (container.nodeType === COMMENT_NODE) {
+  let parentNode: DocumentFragment | Element;
+  if (container.nodeType === DOCUMENT_NODE) {
+    parentNode = (container: any).body;
+  } else if (
+    !disableCommentsAsDOMContainers &&
+    container.nodeType === COMMENT_NODE
+  ) {
     parentNode = (container.parentNode: any);
-    parentNode.insertBefore(child, container);
+    if (supportsMoveBefore && child.parentNode !== null) {
+      // $FlowFixMe[prop-missing]: We've checked this with supportsMoveBefore.
+      parentNode.moveBefore(child, container);
+    } else {
+      parentNode.insertBefore(child, container);
+    }
+    return;
+  } else if (container.nodeName === 'HTML') {
+    parentNode = (container.ownerDocument.body: any);
   } else {
-    parentNode = container;
+    parentNode = (container: any);
+  }
+  if (supportsMoveBefore && child.parentNode !== null) {
+    // $FlowFixMe[prop-missing]: We've checked this with supportsMoveBefore.
+    parentNode.moveBefore(child, null);
+  } else {
     parentNode.appendChild(child);
   }
+
   // This container might be used for a portal.
   // If something inside a portal is clicked, that click should bubble
   // through the React tree. However, on Mobile Safari the click would
@@ -778,7 +875,12 @@ export function insertBefore(
   child: Instance | TextInstance,
   beforeChild: Instance | TextInstance | SuspenseInstance,
 ): void {
-  parentInstance.insertBefore(child, beforeChild);
+  if (supportsMoveBefore && child.parentNode !== null) {
+    // $FlowFixMe[prop-missing]: We've checked this with supportsMoveBefore.
+    parentInstance.moveBefore(child, beforeChild);
+  } else {
+    parentInstance.insertBefore(child, beforeChild);
+  }
 }
 
 export function insertInContainerBefore(
@@ -786,11 +888,29 @@ export function insertInContainerBefore(
   child: Instance | TextInstance,
   beforeChild: Instance | TextInstance | SuspenseInstance,
 ): void {
-  if (container.nodeType === COMMENT_NODE) {
-    (container.parentNode: any).insertBefore(child, beforeChild);
+  let parentNode: DocumentFragment | Element;
+  if (container.nodeType === DOCUMENT_NODE) {
+    parentNode = (container: any).body;
+  } else if (
+    !disableCommentsAsDOMContainers &&
+    container.nodeType === COMMENT_NODE
+  ) {
+    parentNode = (container.parentNode: any);
+  } else if (container.nodeName === 'HTML') {
+    parentNode = (container.ownerDocument.body: any);
   } else {
-    container.insertBefore(child, beforeChild);
+    parentNode = (container: any);
   }
+  if (supportsMoveBefore && child.parentNode !== null) {
+    // $FlowFixMe[prop-missing]: We've checked this with supportsMoveBefore.
+    parentNode.moveBefore(child, beforeChild);
+  } else {
+    parentNode.insertBefore(child, beforeChild);
+  }
+}
+
+export function isSingletonScope(type: string): boolean {
+  return type === 'head';
 }
 
 function createEvent(type: DOMEventName, bubbles: boolean): Event {
@@ -836,11 +956,20 @@ export function removeChildFromContainer(
   container: Container,
   child: Instance | TextInstance | SuspenseInstance,
 ): void {
-  if (container.nodeType === COMMENT_NODE) {
-    (container.parentNode: any).removeChild(child);
+  let parentNode: DocumentFragment | Element;
+  if (container.nodeType === DOCUMENT_NODE) {
+    parentNode = (container: any).body;
+  } else if (
+    !disableCommentsAsDOMContainers &&
+    container.nodeType === COMMENT_NODE
+  ) {
+    parentNode = (container.parentNode: any);
+  } else if (container.nodeName === 'HTML') {
+    parentNode = (container.ownerDocument.body: any);
   } else {
-    container.removeChild(child);
+    parentNode = (container: any);
   }
+  parentNode.removeChild(child);
 }
 
 export function clearSuspenseBoundary(
@@ -848,6 +977,7 @@ export function clearSuspenseBoundary(
   suspenseInstance: SuspenseInstance,
 ): void {
   let node: Node = suspenseInstance;
+  let possiblePreambleContribution: number = 0;
   // Delete all nodes within this suspense boundary.
   // There might be nested nodes so we need to keep track of how
   // deep we are and only break out when we're back on top.
@@ -858,6 +988,36 @@ export function clearSuspenseBoundary(
     if (nextNode && nextNode.nodeType === COMMENT_NODE) {
       const data = ((nextNode: any).data: string);
       if (data === SUSPENSE_END_DATA) {
+        if (
+          // represents 3 bits where at least one bit is set (1-7)
+          possiblePreambleContribution > 0 &&
+          possiblePreambleContribution < 8
+        ) {
+          const code = possiblePreambleContribution;
+          // It's not normally possible to insert a comment immediately preceding Suspense boundary
+          // closing comment marker so we can infer that if the comment preceding starts with "1" through "7"
+          // then it is in fact a preamble contribution marker comment. We do this value test to avoid the case
+          // where the Suspense boundary is empty and the preceding comment marker is the Suspense boundary
+          // opening marker or the closing marker of an inner boundary. In those cases the first character won't
+          // have the requisite value to be interpreted as a Preamble contribution
+          const ownerDocument = parentInstance.ownerDocument;
+          if (code & PREAMBLE_CONTRIBUTION_HTML) {
+            const documentElement: Element =
+              (ownerDocument.documentElement: any);
+            releaseSingletonInstance(documentElement);
+          }
+          if (code & PREAMBLE_CONTRIBUTION_BODY) {
+            const body: Element = (ownerDocument.body: any);
+            releaseSingletonInstance(body);
+          }
+          if (code & PREAMBLE_CONTRIBUTION_HEAD) {
+            const head: Element = (ownerDocument.head: any);
+            releaseSingletonInstance(head);
+            // We need to clear the head because this is the only singleton that can have children that
+            // were part of this boundary but are not inside this boundary.
+            clearHead(head);
+          }
+        }
         if (depth === 0) {
           parentInstance.removeChild(nextNode);
           // Retry if any event replaying was blocked on this.
@@ -872,7 +1032,11 @@ export function clearSuspenseBoundary(
         data === SUSPENSE_FALLBACK_START_DATA
       ) {
         depth++;
+      } else {
+        possiblePreambleContribution = data.charCodeAt(0) - 48;
       }
+    } else {
+      possiblePreambleContribution = 0;
     }
     // $FlowFixMe[incompatible-type] we bail out when we get a null
     node = nextNode;
@@ -886,13 +1050,20 @@ export function clearSuspenseBoundaryFromContainer(
   container: Container,
   suspenseInstance: SuspenseInstance,
 ): void {
-  if (container.nodeType === COMMENT_NODE) {
-    clearSuspenseBoundary((container.parentNode: any), suspenseInstance);
-  } else if (container.nodeType === ELEMENT_NODE) {
-    clearSuspenseBoundary((container: any), suspenseInstance);
+  let parentNode: DocumentFragment | Element;
+  if (container.nodeType === DOCUMENT_NODE) {
+    parentNode = (container: any).body;
+  } else if (
+    !disableCommentsAsDOMContainers &&
+    container.nodeType === COMMENT_NODE
+  ) {
+    parentNode = (container.parentNode: any);
+  } else if (container.nodeName === 'HTML') {
+    parentNode = (container.ownerDocument.body: any);
   } else {
-    // Document nodes should never contain suspense boundaries.
+    parentNode = (container: any);
   }
+  clearSuspenseBoundary(parentNode, suspenseInstance);
   // Retry if any event replaying was blocked on this.
   retryIfBlockedOn(container);
 }
@@ -938,33 +1109,1438 @@ export function unhideTextInstance(
   textInstance.nodeValue = text;
 }
 
-export function clearContainer(container: Container): void {
-  if (enableHostSingletons) {
-    const nodeType = container.nodeType;
-    if (nodeType === DOCUMENT_NODE) {
-      clearContainerSparingly(container);
-    } else if (nodeType === ELEMENT_NODE) {
-      switch (container.nodeName) {
-        case 'HEAD':
-        case 'HTML':
-        case 'BODY':
-          clearContainerSparingly(container);
-          return;
-        default: {
-          container.textContent = '';
+export function applyViewTransitionName(
+  instance: Instance,
+  name: string,
+  className: ?string,
+): void {
+  instance = ((instance: any): HTMLElement);
+  // $FlowFixMe[prop-missing]
+  instance.style.viewTransitionName = name;
+  if (className != null) {
+    // $FlowFixMe[prop-missing]
+    instance.style.viewTransitionClass = className;
+  }
+}
+
+export function restoreViewTransitionName(
+  instance: Instance,
+  props: Props,
+): void {
+  instance = ((instance: any): HTMLElement);
+  const styleProp = props[STYLE];
+  const viewTransitionName =
+    styleProp != null
+      ? styleProp.hasOwnProperty('viewTransitionName')
+        ? styleProp.viewTransitionName
+        : styleProp.hasOwnProperty('view-transition-name')
+          ? styleProp['view-transition-name']
+          : null
+      : null;
+  // $FlowFixMe[prop-missing]
+  instance.style.viewTransitionName =
+    viewTransitionName == null || typeof viewTransitionName === 'boolean'
+      ? ''
+      : // The value would've errored already if it wasn't safe.
+        // eslint-disable-next-line react-internal/safe-string-coercion
+        ('' + viewTransitionName).trim();
+  const viewTransitionClass =
+    styleProp != null
+      ? styleProp.hasOwnProperty('viewTransitionClass')
+        ? styleProp.viewTransitionClass
+        : styleProp.hasOwnProperty('view-transition-class')
+          ? styleProp['view-transition-class']
+          : null
+      : null;
+  // $FlowFixMe[prop-missing]
+  instance.style.viewTransitionClass =
+    viewTransitionClass == null || typeof viewTransitionClass === 'boolean'
+      ? ''
+      : // The value would've errored already if it wasn't safe.
+        // eslint-disable-next-line react-internal/safe-string-coercion
+        ('' + viewTransitionClass).trim();
+}
+
+export function cancelViewTransitionName(
+  instance: Instance,
+  oldName: string,
+  props: Props,
+): void {
+  // To cancel the "new" state and paint this instance as part of the parent, all we have to do
+  // is remove the view-transition-name before we exit startViewTransition.
+  restoreViewTransitionName(instance, props);
+  // There isn't a way to cancel an "old" state but what we can do is hide it by animating it.
+  // Since it is already removed from the old state of the parent, this technique only works
+  // if the parent also isn't transitioning. Therefore we should only cancel the root most
+  // ViewTransitions.
+  const documentElement = instance.ownerDocument.documentElement;
+  if (documentElement !== null) {
+    documentElement.animate(
+      {opacity: [0, 0], pointerEvents: ['none', 'none']},
+      {
+        duration: 0,
+        fill: 'forwards',
+        pseudoElement: '::view-transition-group(' + oldName + ')',
+      },
+    );
+  }
+}
+
+export function cancelRootViewTransitionName(rootContainer: Container): void {
+  const documentElement: null | HTMLElement =
+    rootContainer.nodeType === DOCUMENT_NODE
+      ? (rootContainer: any).documentElement
+      : rootContainer.ownerDocument.documentElement;
+  if (
+    documentElement !== null &&
+    // $FlowFixMe[prop-missing]
+    documentElement.style.viewTransitionName === ''
+  ) {
+    // $FlowFixMe[prop-missing]
+    documentElement.style.viewTransitionName = 'none';
+    documentElement.animate(
+      {opacity: [0, 0], pointerEvents: ['none', 'none']},
+      {
+        duration: 0,
+        fill: 'forwards',
+        pseudoElement: '::view-transition-group(root)',
+      },
+    );
+    // By default the root ::view-transition selector captures all pointer events,
+    // which means nothing gets interactive. We want to let whatever is not animating
+    // remain interactive during the transition. To do that, we set the size to nothing
+    // so that the transition doesn't capture any clicks. We don't set pointer-events
+    // on this one as that would apply to all running transitions. This lets animations
+    // that are running to block clicks so that they don't end up incorrectly hitting
+    // whatever is below the animation.
+    documentElement.animate(
+      {width: [0, 0], height: [0, 0]},
+      {
+        duration: 0,
+        fill: 'forwards',
+        pseudoElement: '::view-transition',
+      },
+    );
+  }
+}
+
+export function restoreRootViewTransitionName(rootContainer: Container): void {
+  let containerInstance: Instance;
+  if (rootContainer.nodeType === DOCUMENT_NODE) {
+    containerInstance = (rootContainer: any).body;
+  } else if (rootContainer.nodeName === 'HTML') {
+    containerInstance = (rootContainer.ownerDocument.body: any);
+  } else {
+    // If the container is not the whole document, then we ideally should probably
+    // clone the whole document outside of the React too.
+    containerInstance = (rootContainer: any);
+  }
+  // $FlowFixMe[prop-missing]
+  if (containerInstance.style.viewTransitionName === 'root') {
+    // If we moved the root view transition name to the container in a gesture
+    // we need to restore it now.
+    containerInstance.style.viewTransitionName = '';
+  }
+  const documentElement: null | HTMLElement =
+    containerInstance.ownerDocument.documentElement;
+  if (
+    documentElement !== null &&
+    // $FlowFixMe[prop-missing]
+    documentElement.style.viewTransitionName === 'none'
+  ) {
+    // $FlowFixMe[prop-missing]
+    documentElement.style.viewTransitionName = '';
+  }
+}
+
+function getComputedTransform(style: CSSStyleDeclaration): string {
+  // Gets the merged transform of all the short hands.
+  const computedStyle: any = style;
+  let transform: string = computedStyle.transform;
+  if (transform === 'none') {
+    transform = '';
+  }
+  const scale: string = computedStyle.scale;
+  if (scale !== 'none' && scale !== '') {
+    const parts = scale.split(' ');
+    transform =
+      (parts.length === 3 ? 'scale3d' : 'scale') +
+      '(' +
+      parts.join(', ') +
+      ') ' +
+      transform;
+  }
+  const rotate: string = computedStyle.rotate;
+  if (rotate !== 'none' && rotate !== '') {
+    const parts = rotate.split(' ');
+    if (parts.length === 1) {
+      transform = 'rotate(' + parts[0] + ') ' + transform;
+    } else if (parts.length === 2) {
+      transform =
+        'rotate' + parts[0].toUpperCase() + '(' + parts[1] + ') ' + transform;
+    } else {
+      transform = 'rotate3d(' + parts.join(', ') + ') ' + transform;
+    }
+  }
+  const translate: string = computedStyle.translate;
+  if (translate !== 'none' && translate !== '') {
+    const parts = translate.split(' ');
+    transform =
+      (parts.length === 3 ? 'translate3d' : 'translate') +
+      '(' +
+      parts.join(', ') +
+      ') ' +
+      transform;
+  }
+  return transform;
+}
+
+function moveOutOfViewport(
+  originalStyle: CSSStyleDeclaration,
+  element: HTMLElement,
+): void {
+  // Apply a transform that safely puts the whole element outside the viewport
+  // while still letting it paint its "old" state to a snapshot.
+  const transform = getComputedTransform(originalStyle);
+  // Clear the long form properties.
+  // $FlowFixMe
+  element.style.translate = 'none';
+  // $FlowFixMe
+  element.style.scale = 'none';
+  // $FlowFixMe
+  element.style.rotate = 'none';
+  // Apply a translate to move it way out of the viewport. This is applied first
+  // so that it is in the coordinate space of the parent and not after applying
+  // other transforms. That's why we need to merge the long form properties.
+  // TODO: Ideally we'd adjust for the parent's rotate/scale. Otherwise when
+  // we move back the ::view-transition-group we might overshoot or undershoot.
+  element.style.transform = 'translate(-20000px, -20000px) ' + transform;
+}
+
+function moveOldFrameIntoViewport(keyframe: any): void {
+  // In the resulting View Transition Animation, the first frame will be offset.
+  const computedTransform: ?string = keyframe.transform;
+  if (computedTransform != null) {
+    let transform = computedTransform === 'none' ? '' : computedTransform;
+    transform = 'translate(20000px, 20000px) ' + transform;
+    keyframe.transform = transform;
+  }
+}
+
+export function cloneRootViewTransitionContainer(
+  rootContainer: Container,
+): Instance {
+  // This implies that we're not going to animate the root document but instead
+  // the clone so we first clear the name of the root container.
+  const documentElement: null | HTMLElement =
+    rootContainer.nodeType === DOCUMENT_NODE
+      ? (rootContainer: any).documentElement
+      : rootContainer.ownerDocument.documentElement;
+  if (
+    documentElement !== null &&
+    // $FlowFixMe[prop-missing]
+    documentElement.style.viewTransitionName === ''
+  ) {
+    // $FlowFixMe[prop-missing]
+    documentElement.style.viewTransitionName = 'none';
+  }
+
+  let containerInstance: HTMLElement;
+  if (rootContainer.nodeType === DOCUMENT_NODE) {
+    containerInstance = (rootContainer: any).body;
+  } else if (rootContainer.nodeName === 'HTML') {
+    containerInstance = (rootContainer.ownerDocument.body: any);
+  } else {
+    // If the container is not the whole document, then we ideally should probably
+    // clone the whole document outside of the React too.
+    containerInstance = (rootContainer: any);
+  }
+
+  const containerParent = containerInstance.parentNode;
+  if (containerParent === null) {
+    throw new Error('Cannot use a useSwipeTransition() in a detached root.');
+  }
+
+  const clone: HTMLElement = containerInstance.cloneNode(false);
+
+  const computedStyle = getComputedStyle(containerInstance);
+
+  if (
+    computedStyle.position === 'absolute' ||
+    computedStyle.position === 'fixed'
+  ) {
+    // If the style is already absolute, we don't have to do anything because it'll appear
+    // in the same place.
+  } else {
+    // Otherwise we need to absolutely position the clone in the same location as the original.
+    let positionedAncestor: HTMLElement = containerParent;
+    while (
+      positionedAncestor.parentNode != null &&
+      positionedAncestor.parentNode.nodeType !== DOCUMENT_NODE
+    ) {
+      if (getComputedStyle(positionedAncestor).position !== 'static') {
+        break;
+      }
+      // $FlowFixMe: This is refined.
+      positionedAncestor = positionedAncestor.parentNode;
+    }
+
+    const positionedAncestorStyle: any = positionedAncestor.style;
+    const containerInstanceStyle: any = containerInstance.style;
+    // Clear the transform while we're measuring since it affects the bounding client rect.
+    const prevAncestorTranslate = positionedAncestorStyle.translate;
+    const prevAncestorScale = positionedAncestorStyle.scale;
+    const prevAncestorRotate = positionedAncestorStyle.rotate;
+    const prevAncestorTransform = positionedAncestorStyle.transform;
+    const prevTranslate = containerInstanceStyle.translate;
+    const prevScale = containerInstanceStyle.scale;
+    const prevRotate = containerInstanceStyle.rotate;
+    const prevTransform = containerInstanceStyle.transform;
+    positionedAncestorStyle.translate = 'none';
+    positionedAncestorStyle.scale = 'none';
+    positionedAncestorStyle.rotate = 'none';
+    positionedAncestorStyle.transform = 'none';
+    containerInstanceStyle.translate = 'none';
+    containerInstanceStyle.scale = 'none';
+    containerInstanceStyle.rotate = 'none';
+    containerInstanceStyle.transform = 'none';
+
+    const ancestorRect = positionedAncestor.getBoundingClientRect();
+    const rect = containerInstance.getBoundingClientRect();
+
+    const cloneStyle = clone.style;
+    cloneStyle.position = 'absolute';
+    cloneStyle.top = rect.top - ancestorRect.top + 'px';
+    cloneStyle.left = rect.left - ancestorRect.left + 'px';
+    cloneStyle.width = rect.width + 'px';
+    cloneStyle.height = rect.height + 'px';
+    cloneStyle.margin = '0px';
+    cloneStyle.boxSizing = 'border-box';
+
+    positionedAncestorStyle.translate = prevAncestorTranslate;
+    positionedAncestorStyle.scale = prevAncestorScale;
+    positionedAncestorStyle.rotate = prevAncestorRotate;
+    positionedAncestorStyle.transform = prevAncestorTransform;
+    containerInstanceStyle.translate = prevTranslate;
+    containerInstanceStyle.scale = prevScale;
+    containerInstanceStyle.rotate = prevRotate;
+    containerInstanceStyle.transform = prevTransform;
+  }
+
+  // For this transition the container will act as the root. Nothing outside of it should
+  // be affected anyway. This lets us transition from the cloned container to the original.
+  // $FlowFixMe[prop-missing]
+  clone.style.viewTransitionName = 'root';
+
+  // Move out of the viewport so that it's still painted for the snapshot but is not visible
+  // for the frame where the snapshot happens.
+  moveOutOfViewport(computedStyle, clone);
+
+  // Insert the clone after the root container as a sibling. This may inject a body
+  // as the next sibling of an existing body. document.body will still point to the
+  // first one and any id selectors will still find the first one. That's why it's
+  // important that it's after the existing node.
+  containerInstance.parentNode.insertBefore(
+    clone,
+    containerInstance.nextSibling,
+  );
+
+  return clone;
+}
+
+export function removeRootViewTransitionClone(
+  rootContainer: Container,
+  clone: Instance,
+): void {
+  let containerInstance: Instance;
+  if (rootContainer.nodeType === DOCUMENT_NODE) {
+    containerInstance = (rootContainer: any).body;
+  } else if (rootContainer.nodeName === 'HTML') {
+    containerInstance = (rootContainer.ownerDocument.body: any);
+  } else {
+    // If the container is not the whole document, then we ideally should probably
+    // clone the whole document outside of the React too.
+    containerInstance = (rootContainer: any);
+  }
+  const containerParent = containerInstance.parentNode;
+  if (containerParent === null) {
+    throw new Error('Cannot use a useSwipeTransition() in a detached root.');
+  }
+  // We assume that the clone is still within the same parent.
+  containerParent.removeChild(clone);
+
+  // Now the root is on the containerInstance itself until we call restoreRootViewTransitionName.
+  containerInstance.style.viewTransitionName = 'root';
+}
+
+export type InstanceMeasurement = {
+  rect: ClientRect | DOMRect,
+  abs: boolean, // is absolutely positioned
+  clip: boolean, // is a clipping parent
+  view: boolean, // is in viewport bounds
+};
+
+function createMeasurement(
+  rect: ClientRect | DOMRect,
+  computedStyle: CSSStyleDeclaration,
+  element: Element,
+): InstanceMeasurement {
+  const ownerWindow = element.ownerDocument.defaultView;
+  return {
+    rect: rect,
+    abs:
+      // Absolutely positioned instances don't contribute their size to the parent.
+      computedStyle.position === 'absolute' ||
+      computedStyle.position === 'fixed',
+    clip:
+      // If a ViewTransition boundary acts as a clipping parent group we should
+      // always mark it to animate if its children do so that we can clip them.
+      // This doesn't actually have any effect yet until browsers implement
+      // layered capture and nested view transitions.
+      computedStyle.clipPath !== 'none' ||
+      computedStyle.overflow !== 'visible' ||
+      computedStyle.filter !== 'none' ||
+      computedStyle.mask !== 'none' ||
+      computedStyle.mask !== 'none' ||
+      computedStyle.borderRadius !== '0px',
+    view:
+      // If the instance was within the bounds of the viewport. We don't care as
+      // much about if it was fully occluded because then it can still pop out.
+      rect.bottom >= 0 &&
+      rect.right >= 0 &&
+      rect.top <= ownerWindow.innerHeight &&
+      rect.left <= ownerWindow.innerWidth,
+  };
+}
+
+export function measureInstance(instance: Instance): InstanceMeasurement {
+  const rect = instance.getBoundingClientRect();
+  const computedStyle = getComputedStyle(instance);
+  return createMeasurement(rect, computedStyle, instance);
+}
+
+export function measureClonedInstance(instance: Instance): InstanceMeasurement {
+  const measuredRect = instance.getBoundingClientRect();
+  // Adjust the DOMRect based on the translate that put it outside the viewport.
+  // TODO: This might not be completely correct if the parent also has a transform.
+  const rect = new DOMRect(
+    measuredRect.x + 20000,
+    measuredRect.y + 20000,
+    measuredRect.width,
+    measuredRect.height,
+  );
+  const computedStyle = getComputedStyle(instance);
+  return createMeasurement(rect, computedStyle, instance);
+}
+
+export function wasInstanceInViewport(
+  measurement: InstanceMeasurement,
+): boolean {
+  return measurement.view;
+}
+
+export function hasInstanceChanged(
+  oldMeasurement: InstanceMeasurement,
+  newMeasurement: InstanceMeasurement,
+): boolean {
+  // Note: This is not guaranteed from the same instance in the case that the Instance of the
+  // ViewTransition swaps out but it's still the same ViewTransition instance.
+  if (newMeasurement.clip) {
+    // If we're a clipping parent, we always animate if any of our children do so that we can clip
+    // them. This doesn't yet until browsers implement layered capture and nested view transitions.
+    return true;
+  }
+  const oldRect = oldMeasurement.rect;
+  const newRect = newMeasurement.rect;
+  return (
+    oldRect.y !== newRect.y ||
+    oldRect.x !== newRect.x ||
+    oldRect.height !== newRect.height ||
+    oldRect.width !== newRect.width
+  );
+}
+
+export function hasInstanceAffectedParent(
+  oldMeasurement: InstanceMeasurement,
+  newMeasurement: InstanceMeasurement,
+): boolean {
+  // Note: This is not guaranteed from the same instance in the case that the Instance of the
+  // ViewTransition swaps out but it's still the same ViewTransition instance.
+  // If the instance has resized, it might have affected the parent layout.
+  if (newMeasurement.abs) {
+    // Absolutely positioned elements don't affect the parent layout, unless they
+    // previously were not absolutely positioned.
+    return !oldMeasurement.abs;
+  }
+  const oldRect = oldMeasurement.rect;
+  const newRect = newMeasurement.rect;
+  return oldRect.height !== newRect.height || oldRect.width !== newRect.width;
+}
+
+function cancelAllViewTransitionAnimations(scope: Element) {
+  // In Safari, we need to manually cancel all manually start animations
+  // or it'll block or interfer with future transitions.
+  const animations = scope.getAnimations({subtree: true});
+  for (let i = 0; i < animations.length; i++) {
+    const anim = animations[i];
+    const effect: KeyframeEffect = (anim.effect: any);
+    // $FlowFixMe
+    const pseudo: ?string = effect.pseudoElement;
+    if (
+      pseudo != null &&
+      pseudo.startsWith('::view-transition') &&
+      effect.target === scope
+    ) {
+      anim.cancel();
+    }
+  }
+}
+
+// How long to wait for new fonts to load before just committing anyway.
+// This freezes the screen. It needs to be short enough that it doesn't cause too much of
+// an issue when it's a new load and slow, yet long enough that you have a chance to load
+// it. Otherwise we wait for no reason. The assumption here is that you likely have
+// either cached the font or preloaded it earlier.
+const SUSPENSEY_FONT_TIMEOUT = 500;
+
+function customizeViewTransitionError(
+  error: Object,
+  ignoreAbort: boolean,
+): mixed {
+  if (typeof error === 'object' && error !== null) {
+    switch (error.name) {
+      case 'TimeoutError': {
+        // We assume that the only reason a Timeout can happen is because the Navigation
+        // promise. We expect any other work to either be fast or have a timeout (fonts).
+        if (__DEV__) {
+          // eslint-disable-next-line react-internal/prod-error-codes
+          return new Error(
+            'A ViewTransition timed out because a Navigation stalled. ' +
+              'This can happen if a Navigation is blocked on React itself. ' +
+              "Such as if it's resolved inside useEffect. " +
+              'This can be solved by moving the resolution to useLayoutEffect.',
+            {cause: error},
+          );
+        }
+        break;
+      }
+      case 'AbortError': {
+        if (ignoreAbort) {
+          return null;
+        }
+        if (__DEV__) {
+          // eslint-disable-next-line react-internal/prod-error-codes
+          return new Error(
+            'A ViewTransition was aborted early. This might be because you have ' +
+              'other View Transition libraries on the page and only one can run at ' +
+              "a time. To avoid this, use only React's built-in <ViewTransition> " +
+              'to coordinate.',
+            {cause: error},
+          );
+        }
+        break;
+      }
+      case 'InvalidStateError': {
+        if (
+          error.message ===
+            'View transition was skipped because document visibility state is hidden.' ||
+          error.message ===
+            'Skipping view transition because document visibility state has become hidden.' ||
+          error.message ===
+            'Skipping view transition because viewport size changed.'
+        ) {
+          // Skip logging this. This is not considered an error.
+          return null;
+        }
+        if (__DEV__) {
+          if (
+            error.message === 'Transition was aborted because of invalid state'
+          ) {
+            // Chrome doesn't include the reason in the message but logs it in the console..
+            // Redirect the user to look there.
+            // eslint-disable-next-line react-internal/prod-error-codes
+            return new Error(
+              'A ViewTransition could not start. See the console for more details.',
+              {cause: error},
+            );
+          }
+        }
+        break;
+      }
+    }
+  }
+  return error;
+}
+
+/** @noinline */
+function forceLayout(ownerDocument: Document) {
+  // This function exists to trick minifiers to not remove this unused member expression.
+  return (ownerDocument.documentElement: any).clientHeight;
+}
+
+export function startViewTransition(
+  rootContainer: Container,
+  transitionTypes: null | TransitionTypes,
+  mutationCallback: () => void,
+  layoutCallback: () => void,
+  afterMutationCallback: () => void,
+  spawnedWorkCallback: () => void,
+  passiveCallback: () => mixed,
+  errorCallback: mixed => void,
+): boolean {
+  const ownerDocument: Document =
+    rootContainer.nodeType === DOCUMENT_NODE
+      ? (rootContainer: any)
+      : rootContainer.ownerDocument;
+  try {
+    // $FlowFixMe[prop-missing]
+    const transition = ownerDocument.startViewTransition({
+      update() {
+        // Note: We read the existence of a pending navigation before we apply the
+        // mutations. That way we're not waiting on a navigation that we spawned
+        // from this update. Only navigations that started before this commit.
+        const ownerWindow = ownerDocument.defaultView;
+        const pendingNavigation =
+          ownerWindow.navigation && ownerWindow.navigation.transition;
+        // $FlowFixMe[prop-missing]
+        const previousFontLoadingStatus = ownerDocument.fonts.status;
+        mutationCallback();
+        if (previousFontLoadingStatus === 'loaded') {
+          // Force layout calculation to trigger font loading.
+          forceLayout(ownerDocument);
+          if (
+            // $FlowFixMe[prop-missing]
+            ownerDocument.fonts.status === 'loading'
+          ) {
+            // The mutation lead to new fonts being loaded. We should wait on them before continuing.
+            // This avoids waiting for potentially unrelated fonts that were already loading before.
+            // Either in an earlier transition or as part of a sync optimistic state. This doesn't
+            // include preloads that happened earlier.
+            const fontsReady = Promise.race([
+              // $FlowFixMe[prop-missing]
+              ownerDocument.fonts.ready,
+              new Promise(resolve =>
+                setTimeout(resolve, SUSPENSEY_FONT_TIMEOUT),
+              ),
+            ]).then(layoutCallback, layoutCallback);
+            const allReady = pendingNavigation
+              ? Promise.allSettled([pendingNavigation.finished, fontsReady])
+              : fontsReady;
+            return allReady.then(afterMutationCallback, afterMutationCallback);
+          }
+        }
+        layoutCallback();
+        if (pendingNavigation) {
+          return pendingNavigation.finished.then(
+            afterMutationCallback,
+            afterMutationCallback,
+          );
+        } else {
+          afterMutationCallback();
+        }
+      },
+      types: transitionTypes,
+    });
+    // $FlowFixMe[prop-missing]
+    ownerDocument.__reactViewTransition = transition;
+    const handleError = (error: mixed) => {
+      try {
+        error = customizeViewTransitionError(error, false);
+        if (error !== null) {
+          errorCallback(error);
+        }
+      } finally {
+        // Continue the reset of the work.
+        spawnedWorkCallback();
+      }
+    };
+    transition.ready.then(spawnedWorkCallback, handleError);
+    transition.finished.finally(() => {
+      cancelAllViewTransitionAnimations((ownerDocument.documentElement: any));
+      // $FlowFixMe[prop-missing]
+      if (ownerDocument.__reactViewTransition === transition) {
+        // $FlowFixMe[prop-missing]
+        ownerDocument.__reactViewTransition = null;
+      }
+      passiveCallback();
+    });
+    return true;
+  } catch (x) {
+    // We use the error as feature detection.
+    // The only thing that should throw is if startViewTransition is missing
+    // or if it doesn't accept the object form. Other errors are async.
+    // I.e. it's before the View Transitions v2 spec. We only support View
+    // Transitions v2 otherwise we fallback to not animating to ensure that
+    // we're not animating with the wrong animation mapped.
+    return false;
+  }
+}
+
+export type RunningGestureTransition = {
+  skipTransition(): void,
+  ...
+};
+
+function mergeTranslate(translateA: ?string, translateB: ?string): string {
+  if (!translateA || translateA === 'none') {
+    return translateB || '';
+  }
+  if (!translateB || translateB === 'none') {
+    return translateA || '';
+  }
+  const partsA = translateA.split(' ');
+  const partsB = translateB.split(' ');
+  let i;
+  let result = '';
+  for (i = 0; i < partsA.length && i < partsB.length; i++) {
+    if (i > 0) {
+      result += ' ';
+    }
+    result += 'calc(' + partsA[i] + ' + ' + partsB[i] + ')';
+  }
+  for (; i < partsA.length; i++) {
+    result += ' ' + partsA[i];
+  }
+  for (; i < partsB.length; i++) {
+    result += ' ' + partsB[i];
+  }
+  return result;
+}
+
+function animateGesture(
+  keyframes: any,
+  targetElement: Element,
+  pseudoElement: string,
+  timeline: AnimationTimeline,
+  rangeStart: number,
+  rangeEnd: number,
+  moveFirstFrameIntoViewport: boolean,
+  moveAllFramesIntoViewport: boolean,
+) {
+  for (let i = 0; i < keyframes.length; i++) {
+    const keyframe = keyframes[i];
+    // Delete any easing since we always apply linear easing to gestures.
+    delete keyframe.easing;
+    delete keyframe.computedOffset;
+    // Chrome returns "auto" for width/height which is not a valid value to
+    // animate to. Similarly, transform: "none" is actually lack of transform.
+    if (keyframe.width === 'auto') {
+      delete keyframe.width;
+    }
+    if (keyframe.height === 'auto') {
+      delete keyframe.height;
+    }
+    if (keyframe.transform === 'none') {
+      delete keyframe.transform;
+    }
+    if (moveAllFramesIntoViewport) {
+      if (keyframe.transform == null) {
+        // If a transform is not explicitly specified to override the auto
+        // generated one on the pseudo element, then we need to adjust it to
+        // put it back into the viewport. We don't know the offset relative to
+        // the screen so instead we use the translate prop to do a relative
+        // adjustment.
+        // TODO: If the "transform" was manually overridden on the pseudo
+        // element itself and no longer the auto generated one, then we shouldn't
+        // adjust it. I'm not sure how to detect this.
+        if (keyframe.translate == null || keyframe.translate === '') {
+          // TODO: If there's a CSS rule targeting translate on the pseudo element
+          // already we need to merge it.
+          const elementTranslate: ?string = (getComputedStyle(
+            targetElement,
+            pseudoElement,
+          ): any).translate;
+          keyframe.translate = mergeTranslate(
+            elementTranslate,
+            '20000px 20000px',
+          );
+        } else {
+          keyframe.translate = mergeTranslate(
+            keyframe.translate,
+            '20000px 20000px',
+          );
         }
       }
     }
+  }
+  if (moveFirstFrameIntoViewport) {
+    // If this is the generated animation that does a FLIP matrix translation
+    // from the old position, we need to adjust it from the out of viewport
+    // position. If this is going from old to new it only applies to first
+    // keyframe. Otherwise it applies to every keyframe.
+    moveOldFrameIntoViewport(keyframes[0]);
+  }
+  const reverse = rangeStart > rangeEnd;
+  targetElement.animate(keyframes, {
+    pseudoElement: pseudoElement,
+    // Set the timeline to the current gesture timeline to drive the updates.
+    timeline: timeline,
+    // We reset all easing functions to linear so that it feels like you
+    // have direct impact on the transition and to avoid double bouncing
+    // from scroll bouncing.
+    easing: 'linear',
+    // We fill in both direction for overscroll.
+    fill: 'both',
+    // We play all gestures in reverse, except if we're in reverse direction
+    // in which case we need to play it in reverse of the reverse.
+    direction: reverse ? 'normal' : 'reverse',
+    // Range start needs to be higher than range end. If it goes in reverse
+    // we reverse the whole animation below.
+    rangeStart: (reverse ? rangeEnd : rangeStart) + '%',
+    rangeEnd: (reverse ? rangeStart : rangeEnd) + '%',
+  });
+}
+
+export function startGestureTransition(
+  rootContainer: Container,
+  timeline: GestureTimeline,
+  rangeStart: number,
+  rangeEnd: number,
+  transitionTypes: null | TransitionTypes,
+  mutationCallback: () => void,
+  animateCallback: () => void,
+  errorCallback: mixed => void,
+): null | RunningGestureTransition {
+  const ownerDocument: Document =
+    rootContainer.nodeType === DOCUMENT_NODE
+      ? (rootContainer: any)
+      : rootContainer.ownerDocument;
+  try {
+    // Force layout before we start the Transition. This works around a bug in Safari
+    // if one of the clones end up being a stylesheet that isn't loaded or uncached.
+    // https://bugs.webkit.org/show_bug.cgi?id=290146
+    forceLayout(ownerDocument);
+    // $FlowFixMe[prop-missing]
+    const transition = ownerDocument.startViewTransition({
+      update: mutationCallback,
+      types: transitionTypes,
+    });
+    // $FlowFixMe[prop-missing]
+    ownerDocument.__reactViewTransition = transition;
+    const readyCallback = () => {
+      const documentElement: Element = (ownerDocument.documentElement: any);
+      // Loop through all View Transition Animations.
+      const animations = documentElement.getAnimations({subtree: true});
+      // First do a pass to collect all known group and new items so we can look
+      // up if they exist later.
+      const foundGroups: Set<string> = new Set();
+      const foundNews: Set<string> = new Set();
+      for (let i = 0; i < animations.length; i++) {
+        // $FlowFixMe
+        const pseudoElement: ?string = animations[i].effect.pseudoElement;
+        if (pseudoElement == null) {
+        } else if (pseudoElement.startsWith('::view-transition-group')) {
+          foundGroups.add(pseudoElement.slice(23));
+        } else if (pseudoElement.startsWith('::view-transition-new')) {
+          // TODO: This is not really a sufficient detection because if the new
+          // pseudo element might exist but have animations disabled on it.
+          foundNews.add(pseudoElement.slice(21));
+        }
+      }
+      for (let i = 0; i < animations.length; i++) {
+        const anim = animations[i];
+        if (anim.playState !== 'running') {
+          continue;
+        }
+        const effect: KeyframeEffect = (anim.effect: any);
+        // $FlowFixMe
+        const pseudoElement: ?string = effect.pseudoElement;
+        if (
+          pseudoElement != null &&
+          pseudoElement.startsWith('::view-transition') &&
+          effect.target === documentElement
+        ) {
+          // Ideally we could mutate the existing animation but unfortunately
+          // the mutable APIs seem less tested and therefore are lacking or buggy.
+          // Therefore we create a new animation instead.
+          anim.cancel();
+          let isGeneratedGroupAnim = false;
+          let isExitGroupAnim = false;
+          if (pseudoElement.startsWith('::view-transition-group')) {
+            const groupName = pseudoElement.slice(23);
+            if (foundNews.has(groupName)) {
+              // If this has both "new" and "old" state we expect this to be an auto-generated
+              // animation that started outside the viewport. We need to adjust this first frame
+              // to be inside the viewport.
+              // $FlowFixMe[prop-missing]
+              const animationName: ?string = anim.animationName;
+              isGeneratedGroupAnim =
+                animationName != null &&
+                // $FlowFixMe[prop-missing]
+                animationName.startsWith('-ua-view-transition-group-anim-');
+            } else {
+              // If this has only an "old" state then the pseudo element will be outside
+              // the viewport. If any keyframes don't override "transform" we need to
+              // adjust them.
+              isExitGroupAnim = true;
+            }
+            // TODO: If this has only an old state and no new state,
+          }
+          animateGesture(
+            effect.getKeyframes(),
+            // $FlowFixMe: Always documentElement atm.
+            effect.target,
+            pseudoElement,
+            timeline,
+            rangeStart,
+            rangeEnd,
+            isGeneratedGroupAnim,
+            isExitGroupAnim,
+          );
+          if (pseudoElement.startsWith('::view-transition-old')) {
+            const groupName = pseudoElement.slice(21);
+            if (!foundGroups.has(groupName) && !foundNews.has(groupName)) {
+              foundGroups.add(groupName);
+              // We haven't seen any group animation with this name. Since the old
+              // state was outside the viewport we need to put it back. Since we
+              // can't programmatically target the element itself, we use an
+              // animation to adjust it.
+              // This usually happens for exit animations where the element has
+              // the old position.
+              // If we also have a "new" state then we skip this because it means
+              // someone manually disabled the auto-generated animation. We need to
+              // treat the old state as having the position of the "new" state which
+              // will happen by default.
+              const pseudoElementName = '::view-transition-group' + groupName;
+              animateGesture(
+                [{}, {}],
+                // $FlowFixMe: Always documentElement atm.
+                effect.target,
+                pseudoElementName,
+                timeline,
+                rangeStart,
+                rangeEnd,
+                false,
+                true, // We let the helper apply the translate
+              );
+            }
+          }
+        }
+      }
+      // View Transitions with ScrollTimeline has a quirk where they end if the
+      // ScrollTimeline ever reaches 100% but that doesn't mean we're done because
+      // you can swipe back again. We can prevent this by adding a paused Animation
+      // that never stops. This seems to keep all running Animations alive until
+      // we explicitly abort (or something forces the View Transition to cancel).
+      const blockingAnim = documentElement.animate([{}, {}], {
+        pseudoElement: '::view-transition',
+        duration: 1,
+      });
+      blockingAnim.pause();
+      animateCallback();
+    };
+    // In Chrome, "new" animations are not ready in the ready callback. We have to wait
+    // until requestAnimationFrame before we can observe them through getAnimations().
+    // However, in Safari, that would cause a flicker because we're applying them late.
+    // TODO: Think of a feature detection for this instead.
+    const readyForAnimations =
+      navigator.userAgent.indexOf('Chrome') !== -1
+        ? () => requestAnimationFrame(readyCallback)
+        : readyCallback;
+    const handleError = (error: mixed) => {
+      try {
+        error = customizeViewTransitionError(error, true);
+        if (error !== null) {
+          errorCallback(error);
+        }
+      } finally {
+        // Continue the reset of the work.
+        readyCallback();
+      }
+    };
+    transition.ready.then(readyForAnimations, handleError);
+    transition.finished.finally(() => {
+      cancelAllViewTransitionAnimations((ownerDocument.documentElement: any));
+      // $FlowFixMe[prop-missing]
+      if (ownerDocument.__reactViewTransition === transition) {
+        // $FlowFixMe[prop-missing]
+        ownerDocument.__reactViewTransition = null;
+      }
+    });
+    return transition;
+  } catch (x) {
+    // We use the error as feature detection.
+    // The only thing that should throw is if startViewTransition is missing
+    // or if it doesn't accept the object form. Other errors are async.
+    // I.e. it's before the View Transitions v2 spec. We only support View
+    // Transitions v2 otherwise we fallback to not animating to ensure that
+    // we're not animating with the wrong animation mapped.
+    // Run through the sequence to put state back into a consistent state.
+    mutationCallback();
+    animateCallback();
+    return null;
+  }
+}
+
+export function stopGestureTransition(transition: RunningGestureTransition) {
+  transition.skipTransition();
+}
+
+interface ViewTransitionPseudoElementType extends Animatable {
+  _scope: HTMLElement;
+  _selector: string;
+}
+
+function ViewTransitionPseudoElement(
+  this: ViewTransitionPseudoElementType,
+  pseudo: string,
+  name: string,
+) {
+  // TODO: Get the owner document from the root container.
+  this._scope = (document.documentElement: any);
+  this._selector = '::view-transition-' + pseudo + '(' + name + ')';
+}
+// $FlowFixMe[prop-missing]
+ViewTransitionPseudoElement.prototype.animate = function (
+  this: ViewTransitionPseudoElementType,
+  keyframes: Keyframe[] | PropertyIndexedKeyframes | null,
+  options?: number | KeyframeAnimationOptions,
+): Animation {
+  const opts: any =
+    typeof options === 'number'
+      ? {
+          duration: options,
+        }
+      : Object.assign(({}: KeyframeAnimationOptions), options);
+  opts.pseudoElement = this._selector;
+  // TODO: Handle multiple child instances.
+  return this._scope.animate(keyframes, opts);
+};
+// $FlowFixMe[prop-missing]
+ViewTransitionPseudoElement.prototype.getAnimations = function (
+  this: ViewTransitionPseudoElementType,
+  options?: GetAnimationsOptions,
+): Animation[] {
+  const scope = this._scope;
+  const selector = this._selector;
+  const animations = scope.getAnimations({subtree: true});
+  const result = [];
+  for (let i = 0; i < animations.length; i++) {
+    const effect: null | {
+      target?: Element,
+      pseudoElement?: string,
+      ...
+    } = (animations[i].effect: any);
+    // TODO: Handle multiple child instances.
+    if (
+      effect !== null &&
+      effect.target === scope &&
+      effect.pseudoElement === selector
+    ) {
+      result.push(animations[i]);
+    }
+  }
+  return result;
+};
+
+export function createViewTransitionInstance(
+  name: string,
+): ViewTransitionInstance {
+  return {
+    name: name,
+    group: new (ViewTransitionPseudoElement: any)('group', name),
+    imagePair: new (ViewTransitionPseudoElement: any)('image-pair', name),
+    old: new (ViewTransitionPseudoElement: any)('old', name),
+    new: new (ViewTransitionPseudoElement: any)('new', name),
+  };
+}
+
+export type GestureTimeline = AnimationTimeline; // TODO: More provider types.
+
+export function getCurrentGestureOffset(provider: GestureTimeline): number {
+  const time = provider.currentTime;
+  if (time === null) {
+    throw new Error(
+      'Cannot start a gesture with a disconnected AnimationTimeline.',
+    );
+  }
+  return typeof time === 'number' ? time : time.value;
+}
+
+export function subscribeToGestureDirection(
+  provider: GestureTimeline,
+  currentOffset: number,
+  directionCallback: (direction: boolean) => void,
+): () => void {
+  if (
+    typeof ScrollTimeline === 'function' &&
+    provider instanceof ScrollTimeline
+  ) {
+    // For ScrollTimeline we optimize to only update the current time on scroll events.
+    const element = provider.source;
+    const scrollCallback = () => {
+      const newTime = provider.currentTime;
+      if (newTime !== null) {
+        const newValue = typeof newTime === 'number' ? newTime : newTime.value;
+        if (newValue !== currentOffset) {
+          directionCallback(newValue > currentOffset);
+        }
+      }
+    };
+    element.addEventListener('scroll', scrollCallback, false);
+    return () => {
+      element.removeEventListener('scroll', scrollCallback, false);
+    };
   } else {
-    if (container.nodeType === ELEMENT_NODE) {
-      // We have refined the container to Element type
-      const element: Element = (container: any);
-      element.textContent = '';
-    } else if (container.nodeType === DOCUMENT_NODE) {
-      // We have refined the container to Document type
-      const doc: Document = (container: any);
-      if (doc.documentElement) {
-        doc.removeChild(doc.documentElement);
+    // For other AnimationTimelines, such as DocumentTimeline, we just update every rAF.
+    // TODO: Optimize ViewTimeline using an IntersectionObserver if it becomes common.
+    const rafCallback = () => {
+      const newTime = provider.currentTime;
+      if (newTime !== null) {
+        const newValue = typeof newTime === 'number' ? newTime : newTime.value;
+        if (newValue !== currentOffset) {
+          directionCallback(newValue > currentOffset);
+        }
+      }
+      callbackID = requestAnimationFrame(rafCallback);
+    };
+    let callbackID = requestAnimationFrame(rafCallback);
+    return () => {
+      cancelAnimationFrame(callbackID);
+    };
+  }
+}
+
+type EventListenerOptionsOrUseCapture =
+  | boolean
+  | {
+      capture?: boolean,
+      once?: boolean,
+      passive?: boolean,
+      signal?: AbortSignal,
+      ...
+    };
+
+type StoredEventListener = {
+  type: string,
+  listener: EventListener,
+  optionsOrUseCapture: void | EventListenerOptionsOrUseCapture,
+};
+
+type FocusOptions = {
+  preventScroll?: boolean,
+  focusVisible?: boolean,
+};
+
+export type FragmentInstanceType = {
+  _fragmentFiber: Fiber,
+  _eventListeners: null | Array<StoredEventListener>,
+  _observers: null | Set<IntersectionObserver | ResizeObserver>,
+  addEventListener(
+    type: string,
+    listener: EventListener,
+    optionsOrUseCapture?: EventListenerOptionsOrUseCapture,
+  ): void,
+  removeEventListener(
+    type: string,
+    listener: EventListener,
+    optionsOrUseCapture?: EventListenerOptionsOrUseCapture,
+  ): void,
+  focus(focusOptions?: FocusOptions): void,
+  focusLast(focusOptions?: FocusOptions): void,
+  blur(): void,
+  observeUsing(observer: IntersectionObserver | ResizeObserver): void,
+  unobserveUsing(observer: IntersectionObserver | ResizeObserver): void,
+  getClientRects(): Array<DOMRect>,
+  getRootNode(getRootNodeOptions?: {
+    composed: boolean,
+  }): Document | ShadowRoot | FragmentInstanceType,
+};
+
+function FragmentInstance(this: FragmentInstanceType, fragmentFiber: Fiber) {
+  this._fragmentFiber = fragmentFiber;
+  this._eventListeners = null;
+  this._observers = null;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.addEventListener = function (
+  this: FragmentInstanceType,
+  type: string,
+  listener: EventListener,
+  optionsOrUseCapture?: EventListenerOptionsOrUseCapture,
+): void {
+  if (this._eventListeners === null) {
+    this._eventListeners = [];
+  }
+
+  const listeners = this._eventListeners;
+  // Element.addEventListener will only apply uniquely new event listeners by default. Since we
+  // need to collect the listeners to apply to appended children, we track them ourselves and use
+  // custom equality check for the options.
+  const isNewEventListener =
+    indexOfEventListener(listeners, type, listener, optionsOrUseCapture) === -1;
+  if (isNewEventListener) {
+    listeners.push({type, listener, optionsOrUseCapture});
+    traverseFragmentInstance(
+      this._fragmentFiber,
+      addEventListenerToChild,
+      type,
+      listener,
+      optionsOrUseCapture,
+    );
+  }
+  this._eventListeners = listeners;
+};
+function addEventListenerToChild(
+  child: Instance,
+  type: string,
+  listener: EventListener,
+  optionsOrUseCapture?: EventListenerOptionsOrUseCapture,
+): boolean {
+  child.addEventListener(type, listener, optionsOrUseCapture);
+  return false;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.removeEventListener = function (
+  this: FragmentInstanceType,
+  type: string,
+  listener: EventListener,
+  optionsOrUseCapture?: EventListenerOptionsOrUseCapture,
+): void {
+  const listeners = this._eventListeners;
+  if (listeners === null) {
+    return;
+  }
+  if (typeof listeners !== 'undefined' && listeners.length > 0) {
+    traverseFragmentInstance(
+      this._fragmentFiber,
+      removeEventListenerFromChild,
+      type,
+      listener,
+      optionsOrUseCapture,
+    );
+    const index = indexOfEventListener(
+      listeners,
+      type,
+      listener,
+      optionsOrUseCapture,
+    );
+    if (this._eventListeners !== null) {
+      this._eventListeners.splice(index, 1);
+    }
+  }
+};
+function removeEventListenerFromChild(
+  child: Instance,
+  type: string,
+  listener: EventListener,
+  optionsOrUseCapture?: EventListenerOptionsOrUseCapture,
+): boolean {
+  child.removeEventListener(type, listener, optionsOrUseCapture);
+  return false;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.focus = function (
+  this: FragmentInstanceType,
+  focusOptions?: FocusOptions,
+): void {
+  traverseFragmentInstance(
+    this._fragmentFiber,
+    setFocusIfFocusable,
+    focusOptions,
+  );
+};
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.focusLast = function (
+  this: FragmentInstanceType,
+  focusOptions?: FocusOptions,
+): void {
+  const children: Array<Instance> = [];
+  traverseFragmentInstance(this._fragmentFiber, collectChildren, children);
+  for (let i = children.length - 1; i >= 0; i--) {
+    const child = children[i];
+    if (setFocusIfFocusable(child, focusOptions)) {
+      break;
+    }
+  }
+};
+function collectChildren(
+  child: Instance,
+  collection: Array<Instance>,
+): boolean {
+  collection.push(child);
+  return false;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.blur = function (this: FragmentInstanceType): void {
+  // TODO: When we have a parent element reference, we can skip traversal if the fragment's parent
+  //   does not contain document.activeElement
+  traverseFragmentInstance(
+    this._fragmentFiber,
+    blurActiveElementWithinFragment,
+  );
+};
+function blurActiveElementWithinFragment(child: Instance): boolean {
+  // TODO: We can get the activeElement from the parent outside of the loop when we have a reference.
+  const ownerDocument = child.ownerDocument;
+  if (child === ownerDocument.activeElement) {
+    // $FlowFixMe[prop-missing]
+    child.blur();
+    return true;
+  }
+  return false;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.observeUsing = function (
+  this: FragmentInstanceType,
+  observer: IntersectionObserver | ResizeObserver,
+): void {
+  if (this._observers === null) {
+    this._observers = new Set();
+  }
+  this._observers.add(observer);
+  traverseFragmentInstance(this._fragmentFiber, observeChild, observer);
+};
+function observeChild(
+  child: Instance,
+  observer: IntersectionObserver | ResizeObserver,
+) {
+  observer.observe(child);
+  return false;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.unobserveUsing = function (
+  this: FragmentInstanceType,
+  observer: IntersectionObserver | ResizeObserver,
+): void {
+  if (this._observers === null || !this._observers.has(observer)) {
+    if (__DEV__) {
+      console.error(
+        'You are calling unobserveUsing() with an observer that is not being observed with this fragment ' +
+          'instance. First attach the observer with observeUsing()',
+      );
+    }
+  } else {
+    this._observers.delete(observer);
+    traverseFragmentInstance(this._fragmentFiber, unobserveChild, observer);
+  }
+};
+function unobserveChild(
+  child: Instance,
+  observer: IntersectionObserver | ResizeObserver,
+) {
+  observer.unobserve(child);
+  return false;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.getClientRects = function (
+  this: FragmentInstanceType,
+): Array<DOMRect> {
+  const rects: Array<DOMRect> = [];
+  traverseFragmentInstance(this._fragmentFiber, collectClientRects, rects);
+  return rects;
+};
+function collectClientRects(child: Instance, rects: Array<DOMRect>): boolean {
+  // $FlowFixMe[method-unbinding]
+  rects.push.apply(rects, child.getClientRects());
+  return false;
+}
+// $FlowFixMe[prop-missing]
+FragmentInstance.prototype.getRootNode = function (
+  this: FragmentInstanceType,
+  getRootNodeOptions?: {composed: boolean},
+): Document | ShadowRoot | FragmentInstanceType {
+  const parentHostInstance = getFragmentParentHostInstance(this._fragmentFiber);
+  if (parentHostInstance === null) {
+    return this;
+  }
+  const rootNode =
+    // $FlowFixMe[incompatible-cast] Flow expects Node
+    (parentHostInstance.getRootNode(getRootNodeOptions): Document | ShadowRoot);
+  return rootNode;
+};
+
+function normalizeListenerOptions(
+  opts: ?EventListenerOptionsOrUseCapture,
+): string {
+  if (opts == null) {
+    return '0';
+  }
+
+  if (typeof opts === 'boolean') {
+    return `c=${opts ? '1' : '0'}`;
+  }
+
+  return `c=${opts.capture ? '1' : '0'}&o=${opts.once ? '1' : '0'}&p=${opts.passive ? '1' : '0'}`;
+}
+
+function indexOfEventListener(
+  eventListeners: Array<StoredEventListener>,
+  type: string,
+  listener: EventListener,
+  optionsOrUseCapture: void | EventListenerOptionsOrUseCapture,
+): number {
+  for (let i = 0; i < eventListeners.length; i++) {
+    const item = eventListeners[i];
+    if (
+      item.type === type &&
+      item.listener === listener &&
+      normalizeListenerOptions(item.optionsOrUseCapture) ===
+        normalizeListenerOptions(optionsOrUseCapture)
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+export function createFragmentInstance(
+  fragmentFiber: Fiber,
+): FragmentInstanceType {
+  return new (FragmentInstance: any)(fragmentFiber);
+}
+
+export function updateFragmentInstanceFiber(
+  fragmentFiber: Fiber,
+  instance: FragmentInstanceType,
+): void {
+  instance._fragmentFiber = fragmentFiber;
+}
+
+export function commitNewChildToFragmentInstance(
+  childElement: Instance,
+  fragmentInstance: FragmentInstanceType,
+): void {
+  const eventListeners = fragmentInstance._eventListeners;
+  if (eventListeners !== null) {
+    for (let i = 0; i < eventListeners.length; i++) {
+      const {type, listener, optionsOrUseCapture} = eventListeners[i];
+      childElement.addEventListener(type, listener, optionsOrUseCapture);
+    }
+  }
+  if (fragmentInstance._observers !== null) {
+    fragmentInstance._observers.forEach(observer => {
+      observer.observe(childElement);
+    });
+  }
+}
+
+export function deleteChildFromFragmentInstance(
+  childElement: Instance,
+  fragmentInstance: FragmentInstanceType,
+): void {
+  const eventListeners = fragmentInstance._eventListeners;
+  if (eventListeners !== null) {
+    for (let i = 0; i < eventListeners.length; i++) {
+      const {type, listener, optionsOrUseCapture} = eventListeners[i];
+      childElement.removeEventListener(type, listener, optionsOrUseCapture);
+    }
+  }
+}
+
+export function clearContainer(container: Container): void {
+  const nodeType = container.nodeType;
+  if (nodeType === DOCUMENT_NODE) {
+    clearContainerSparingly(container);
+  } else if (nodeType === ELEMENT_NODE) {
+    switch (container.nodeName) {
+      case 'HEAD':
+      case 'HTML':
+      case 'BODY':
+        clearContainerSparingly(container);
+        return;
+      default: {
+        container.textContent = '';
       }
     }
   }
@@ -1008,7 +2584,7 @@ function clearContainerSparingly(container: Node) {
       case 'STYLE': {
         continue;
       }
-      // Stylesheet tags are retained because tehy may likely come from 3rd party scripts and extensions
+      // Stylesheet tags are retained because they may likely come from 3rd party scripts and extensions
       case 'LINK': {
         if (((node: any): HTMLLinkElement).rel.toLowerCase() === 'stylesheet') {
           continue;
@@ -1016,6 +2592,27 @@ function clearContainerSparingly(container: Node) {
       }
     }
     container.removeChild(node);
+  }
+  return;
+}
+
+function clearHead(head: Element): void {
+  let node = head.firstChild;
+  while (node) {
+    const nextNode = node.nextSibling;
+    const nodeName = node.nodeName;
+    if (
+      isMarkedHoistable(node) ||
+      nodeName === 'SCRIPT' ||
+      nodeName === 'STYLE' ||
+      (nodeName === 'LINK' &&
+        ((node: any): HTMLLinkElement).rel.toLowerCase() === 'stylesheet')
+    ) {
+      // retain these nodes
+    } else {
+      head.removeChild(node);
+    }
+    node = nextNode;
   }
   return;
 }
@@ -1039,10 +2636,6 @@ export function bindInstance(
 
 export const supportsHydration = true;
 
-export function isHydratableText(text: string): boolean {
-  return text !== '';
-}
-
 export function canHydrateInstance(
   instance: HydratableInstance,
   type: string,
@@ -1053,13 +2646,9 @@ export function canHydrateInstance(
     const element: Element = (instance: any);
     const anyProps = (props: any);
     if (element.nodeName.toLowerCase() !== type.toLowerCase()) {
-      if (!inRootOrSingleton || !enableHostSingletons) {
+      if (!inRootOrSingleton) {
         // Usually we error for mismatched tags.
-        if (
-          enableFormActions &&
-          element.nodeName === 'INPUT' &&
-          (element: any).type === 'hidden'
-        ) {
+        if (element.nodeName === 'INPUT' && (element: any).type === 'hidden') {
           // If we have extra hidden inputs, we don't mismatch. This allows us to embed
           // extra form data in the original form.
         } else {
@@ -1067,13 +2656,9 @@ export function canHydrateInstance(
         }
       }
       // In root or singleton parents we skip past mismatched instances.
-    } else if (!inRootOrSingleton || !enableHostSingletons) {
+    } else if (!inRootOrSingleton) {
       // Match
-      if (
-        enableFormActions &&
-        type === 'input' &&
-        (element: any).type === 'hidden'
-      ) {
+      if (type === 'input' && (element: any).type === 'hidden') {
         if (__DEV__) {
           checkAttributeStringCoercion(anyProps.name, 'name');
         }
@@ -1125,7 +2710,9 @@ export function canHydrateInstance(
           } else if (
             rel !== anyProps.rel ||
             element.getAttribute('href') !==
-              (anyProps.href == null ? null : anyProps.href) ||
+              (anyProps.href == null || anyProps.href === ''
+                ? null
+                : anyProps.href) ||
             element.getAttribute('crossorigin') !==
               (anyProps.crossOrigin == null ? null : anyProps.crossOrigin) ||
             element.getAttribute('title') !==
@@ -1205,14 +2792,13 @@ export function canHydrateTextInstance(
 
   while (instance.nodeType !== TEXT_NODE) {
     if (
-      enableFormActions &&
       instance.nodeType === ELEMENT_NODE &&
       instance.nodeName === 'INPUT' &&
       (instance: any).type === 'hidden'
     ) {
       // If we have extra hidden inputs, we don't mismatch. This allows us to
       // embed extra form data in the original form.
-    } else if (!inRootOrSingleton || !enableHostSingletons) {
+    } else if (!inRootOrSingleton) {
       return null;
     }
     const nextInstance = getNextHydratableSibling(instance);
@@ -1230,7 +2816,7 @@ export function canHydrateSuspenseInstance(
   inRootOrSingleton: boolean,
 ): null | SuspenseInstance {
   while (instance.nodeType !== COMMENT_NODE) {
-    if (!inRootOrSingleton || !enableHostSingletons) {
+    if (!inRootOrSingleton) {
       return null;
     }
     const nextInstance = getNextHydratableSibling(instance);
@@ -1250,20 +2836,30 @@ export function isSuspenseInstancePending(instance: SuspenseInstance): boolean {
 export function isSuspenseInstanceFallback(
   instance: SuspenseInstance,
 ): boolean {
-  return instance.data === SUSPENSE_FALLBACK_START_DATA;
+  return (
+    instance.data === SUSPENSE_FALLBACK_START_DATA ||
+    (instance.data === SUSPENSE_PENDING_START_DATA &&
+      instance.ownerDocument.readyState === DOCUMENT_READY_STATE_COMPLETE)
+  );
 }
 
 export function getSuspenseInstanceFallbackErrorDetails(
   instance: SuspenseInstance,
-): {digest: ?string, message?: string, stack?: string} {
+): {
+  digest: ?string,
+  message?: string,
+  stack?: string,
+  componentStack?: string,
+} {
   const dataset =
     instance.nextSibling && ((instance.nextSibling: any): HTMLElement).dataset;
-  let digest, message, stack;
+  let digest, message, stack, componentStack;
   if (dataset) {
     digest = dataset.dgst;
     if (__DEV__) {
       message = dataset.msg;
       stack = dataset.stck;
+      componentStack = dataset.cstck;
     }
   }
   if (__DEV__) {
@@ -1271,6 +2867,7 @@ export function getSuspenseInstanceFallbackErrorDetails(
       message,
       digest,
       stack,
+      componentStack,
     };
   } else {
     // Object gets DCE'd if constructed in tail position and matches callsite destructuring
@@ -1284,7 +2881,29 @@ export function registerSuspenseInstanceRetry(
   instance: SuspenseInstance,
   callback: () => void,
 ) {
-  instance._reactRetry = callback;
+  const ownerDocument = instance.ownerDocument;
+  if (
+    // The Fizz runtime must have put this boundary into client render or complete
+    // state after the render finished but before it committed. We need to call the
+    // callback now rather than wait
+    instance.data !== SUSPENSE_PENDING_START_DATA ||
+    // The boundary is still in pending status but the document has finished loading
+    // before we could register the event handler that would have scheduled the retry
+    // on load so we call teh callback now.
+    ownerDocument.readyState === DOCUMENT_READY_STATE_COMPLETE
+  ) {
+    callback();
+  } else {
+    // We're still in pending status and the document is still loading so we attach
+    // a listener to the document load even and expose the retry on the instance for
+    // the Fizz runtime to trigger if it ends up resolving this boundary
+    const listener = () => {
+      callback();
+      ownerDocument.removeEventListener('DOMContentLoaded', listener);
+    };
+    ownerDocument.addEventListener('DOMContentLoaded', listener);
+    instance._reactRetry = listener;
+  }
 }
 
 export function canHydrateFormStateMarker(
@@ -1292,7 +2911,7 @@ export function canHydrateFormStateMarker(
   inRootOrSingleton: boolean,
 ): null | FormStateMarkerInstance {
   while (instance.nodeType !== COMMENT_NODE) {
-    if (!inRootOrSingleton || !enableHostSingletons) {
+    if (!inRootOrSingleton) {
       return null;
     }
     const nextInstance = getNextHydratableSibling(instance);
@@ -1331,10 +2950,8 @@ function getNextHydratable(node: ?Node) {
         nodeData === SUSPENSE_START_DATA ||
         nodeData === SUSPENSE_FALLBACK_START_DATA ||
         nodeData === SUSPENSE_PENDING_START_DATA ||
-        (enableFormActions &&
-          enableAsyncActions &&
-          (nodeData === FORM_STATE_IS_MATCHING ||
-            nodeData === FORM_STATE_IS_NOT_MATCHING))
+        nodeData === FORM_STATE_IS_MATCHING ||
+        nodeData === FORM_STATE_IS_NOT_MATCHING
       ) {
         break;
       }
@@ -1361,7 +2978,20 @@ export function getFirstHydratableChild(
 export function getFirstHydratableChildWithinContainer(
   parentContainer: Container,
 ): null | HydratableInstance {
-  return getNextHydratable(parentContainer.firstChild);
+  let parentElement: Element;
+  switch (parentContainer.nodeType) {
+    case DOCUMENT_NODE:
+      parentElement = (parentContainer: any).body;
+      break;
+    default: {
+      if (parentContainer.nodeName === 'HTML') {
+        parentElement = (parentContainer: any).ownerDocument.body;
+      } else {
+        parentElement = (parentContainer: any);
+      }
+    }
+  }
+  return getNextHydratable(parentElement.firstChild);
 }
 
 export function getFirstHydratableChildWithinSuspenseInstance(
@@ -1370,48 +3000,140 @@ export function getFirstHydratableChildWithinSuspenseInstance(
   return getNextHydratable(parentInstance.nextSibling);
 }
 
+// If it were possible to have more than one scope singleton in a DOM tree
+// we would need to model this as a stack but since you can only have one <head>
+// and head is the only singleton that is a scope in DOM we can get away with
+// tracking this as a single value.
+let previousHydratableOnEnteringScopedSingleton: null | HydratableInstance =
+  null;
+
+export function getFirstHydratableChildWithinSingleton(
+  type: string,
+  singletonInstance: Instance,
+  currentHydratableInstance: null | HydratableInstance,
+): null | HydratableInstance {
+  if (isSingletonScope(type)) {
+    previousHydratableOnEnteringScopedSingleton = currentHydratableInstance;
+    return getNextHydratable(singletonInstance.firstChild);
+  } else {
+    return currentHydratableInstance;
+  }
+}
+
+export function getNextHydratableSiblingAfterSingleton(
+  type: string,
+  currentHydratableInstance: null | HydratableInstance,
+): null | HydratableInstance {
+  if (isSingletonScope(type)) {
+    const previousHydratableInstance =
+      previousHydratableOnEnteringScopedSingleton;
+    previousHydratableOnEnteringScopedSingleton = null;
+    return previousHydratableInstance;
+  } else {
+    return currentHydratableInstance;
+  }
+}
+
+export function describeHydratableInstanceForDevWarnings(
+  instance: HydratableInstance,
+): string | {type: string, props: $ReadOnly<Props>} {
+  // Reverse engineer a pseudo react-element from hydratable instance
+  if (instance.nodeType === ELEMENT_NODE) {
+    // Reverse engineer a set of props that can print for dev warnings
+    return {
+      type: instance.nodeName.toLowerCase(),
+      props: getPropsFromElement((instance: any)),
+    };
+  } else if (instance.nodeType === COMMENT_NODE) {
+    return {
+      type: 'Suspense',
+      props: {},
+    };
+  } else {
+    return instance.nodeValue;
+  }
+}
+
+export function validateHydratableInstance(
+  type: string,
+  props: Props,
+  hostContext: HostContext,
+): boolean {
+  if (__DEV__) {
+    // TODO: take namespace into account when validating.
+    const hostContextDev: HostContextDev = (hostContext: any);
+    return validateDOMNesting(type, hostContextDev.ancestorInfo);
+  }
+  return true;
+}
+
 export function hydrateInstance(
   instance: Instance,
   type: string,
   props: Props,
   hostContext: HostContext,
   internalInstanceHandle: Object,
-  shouldWarnDev: boolean,
-): void {
+): boolean {
   precacheFiberNode(internalInstanceHandle, instance);
   // TODO: Possibly defer this until the commit phase where all the events
   // get attached.
   updateFiberProps(instance, props);
 
-  // TODO: Temporary hack to check if we're in a concurrent root. We can delete
-  // when the legacy root API is removed.
-  const isConcurrentMode =
-    ((internalInstanceHandle: Fiber).mode & ConcurrentMode) !== NoMode;
+  return hydrateProperties(instance, type, props, hostContext);
+}
 
-  diffHydratedProperties(
-    instance,
-    type,
-    props,
-    isConcurrentMode,
-    shouldWarnDev,
-    hostContext,
-  );
+// Returns a Map of properties that were different on the server.
+export function diffHydratedPropsForDevWarnings(
+  instance: Instance,
+  type: string,
+  props: Props,
+  hostContext: HostContext,
+): null | $ReadOnly<Props> {
+  return diffHydratedProperties(instance, type, props, hostContext);
+}
+
+export function validateHydratableTextInstance(
+  text: string,
+  hostContext: HostContext,
+): boolean {
+  if (__DEV__) {
+    const hostContextDev = ((hostContext: any): HostContextDev);
+    const ancestor = hostContextDev.ancestorInfo.current;
+    if (ancestor != null) {
+      return validateTextNesting(
+        text,
+        ancestor.tag,
+        hostContextDev.ancestorInfo.implicitRootScope,
+      );
+    }
+  }
+  return true;
 }
 
 export function hydrateTextInstance(
   textInstance: TextInstance,
   text: string,
   internalInstanceHandle: Object,
-  shouldWarnDev: boolean,
+  parentInstanceProps: null | Props,
 ): boolean {
   precacheFiberNode(internalInstanceHandle, textInstance);
 
-  // TODO: Temporary hack to check if we're in a concurrent root. We can delete
-  // when the legacy root API is removed.
-  const isConcurrentMode =
-    ((internalInstanceHandle: Fiber).mode & ConcurrentMode) !== NoMode;
+  return hydrateText(textInstance, text, parentInstanceProps);
+}
 
-  return diffHydratedText(textInstance, text, isConcurrentMode);
+// Returns the server text if it differs from the client.
+export function diffHydratedTextForDevWarnings(
+  textInstance: TextInstance,
+  text: string,
+  parentProps: null | Props,
+): null | string {
+  if (
+    parentProps === null ||
+    parentProps[SUPPRESS_HYDRATION_WARNING] !== true
+  ) {
+    return diffHydratedText(textInstance, text);
+  }
+  return null;
 }
 
 export function hydrateSuspenseInstance(
@@ -1500,209 +3222,7 @@ export function commitHydratedSuspenseInstance(
 export function shouldDeleteUnhydratedTailInstances(
   parentType: string,
 ): boolean {
-  return (
-    (enableHostSingletons ||
-      (parentType !== 'head' && parentType !== 'body')) &&
-    (!enableFormActions || (parentType !== 'form' && parentType !== 'button'))
-  );
-}
-
-export function didNotMatchHydratedContainerTextInstance(
-  parentContainer: Container,
-  textInstance: TextInstance,
-  text: string,
-  isConcurrentMode: boolean,
-  shouldWarnDev: boolean,
-) {
-  checkForUnmatchedText(
-    textInstance.nodeValue,
-    text,
-    isConcurrentMode,
-    shouldWarnDev,
-  );
-}
-
-export function didNotMatchHydratedTextInstance(
-  parentType: string,
-  parentProps: Props,
-  parentInstance: Instance,
-  textInstance: TextInstance,
-  text: string,
-  isConcurrentMode: boolean,
-  shouldWarnDev: boolean,
-) {
-  if (parentProps[SUPPRESS_HYDRATION_WARNING] !== true) {
-    checkForUnmatchedText(
-      textInstance.nodeValue,
-      text,
-      isConcurrentMode,
-      shouldWarnDev,
-    );
-  }
-}
-
-export function didNotHydrateInstanceWithinContainer(
-  parentContainer: Container,
-  instance: HydratableInstance,
-) {
-  if (__DEV__) {
-    if (instance.nodeType === ELEMENT_NODE) {
-      warnForDeletedHydratableElement(parentContainer, (instance: any));
-    } else if (instance.nodeType === COMMENT_NODE) {
-      // TODO: warnForDeletedHydratableSuspenseBoundary
-    } else {
-      warnForDeletedHydratableText(parentContainer, (instance: any));
-    }
-  }
-}
-
-export function didNotHydrateInstanceWithinSuspenseInstance(
-  parentInstance: SuspenseInstance,
-  instance: HydratableInstance,
-) {
-  if (__DEV__) {
-    // $FlowFixMe[incompatible-type]: Only Element or Document can be parent nodes.
-    const parentNode: Element | Document | null = parentInstance.parentNode;
-    if (parentNode !== null) {
-      if (instance.nodeType === ELEMENT_NODE) {
-        warnForDeletedHydratableElement(parentNode, (instance: any));
-      } else if (instance.nodeType === COMMENT_NODE) {
-        // TODO: warnForDeletedHydratableSuspenseBoundary
-      } else {
-        warnForDeletedHydratableText(parentNode, (instance: any));
-      }
-    }
-  }
-}
-
-export function didNotHydrateInstance(
-  parentType: string,
-  parentProps: Props,
-  parentInstance: Instance,
-  instance: HydratableInstance,
-  isConcurrentMode: boolean,
-) {
-  if (__DEV__) {
-    if (isConcurrentMode || parentProps[SUPPRESS_HYDRATION_WARNING] !== true) {
-      if (instance.nodeType === ELEMENT_NODE) {
-        warnForDeletedHydratableElement(parentInstance, (instance: any));
-      } else if (instance.nodeType === COMMENT_NODE) {
-        // TODO: warnForDeletedHydratableSuspenseBoundary
-      } else {
-        warnForDeletedHydratableText(parentInstance, (instance: any));
-      }
-    }
-  }
-}
-
-export function didNotFindHydratableInstanceWithinContainer(
-  parentContainer: Container,
-  type: string,
-  props: Props,
-) {
-  if (__DEV__) {
-    warnForInsertedHydratedElement(parentContainer, type, props);
-  }
-}
-
-export function didNotFindHydratableTextInstanceWithinContainer(
-  parentContainer: Container,
-  text: string,
-) {
-  if (__DEV__) {
-    warnForInsertedHydratedText(parentContainer, text);
-  }
-}
-
-export function didNotFindHydratableSuspenseInstanceWithinContainer(
-  parentContainer: Container,
-) {
-  if (__DEV__) {
-    // TODO: warnForInsertedHydratedSuspense(parentContainer);
-  }
-}
-
-export function didNotFindHydratableInstanceWithinSuspenseInstance(
-  parentInstance: SuspenseInstance,
-  type: string,
-  props: Props,
-) {
-  if (__DEV__) {
-    // $FlowFixMe[incompatible-type]: Only Element or Document can be parent nodes.
-    const parentNode: Element | Document | null = parentInstance.parentNode;
-    if (parentNode !== null)
-      warnForInsertedHydratedElement(parentNode, type, props);
-  }
-}
-
-export function didNotFindHydratableTextInstanceWithinSuspenseInstance(
-  parentInstance: SuspenseInstance,
-  text: string,
-) {
-  if (__DEV__) {
-    // $FlowFixMe[incompatible-type]: Only Element or Document can be parent nodes.
-    const parentNode: Element | Document | null = parentInstance.parentNode;
-    if (parentNode !== null) warnForInsertedHydratedText(parentNode, text);
-  }
-}
-
-export function didNotFindHydratableSuspenseInstanceWithinSuspenseInstance(
-  parentInstance: SuspenseInstance,
-) {
-  if (__DEV__) {
-    // const parentNode: Element | Document | null = parentInstance.parentNode;
-    // TODO: warnForInsertedHydratedSuspense(parentNode);
-  }
-}
-
-export function didNotFindHydratableInstance(
-  parentType: string,
-  parentProps: Props,
-  parentInstance: Instance,
-  type: string,
-  props: Props,
-  isConcurrentMode: boolean,
-) {
-  if (__DEV__) {
-    if (isConcurrentMode || parentProps[SUPPRESS_HYDRATION_WARNING] !== true) {
-      warnForInsertedHydratedElement(parentInstance, type, props);
-    }
-  }
-}
-
-export function didNotFindHydratableTextInstance(
-  parentType: string,
-  parentProps: Props,
-  parentInstance: Instance,
-  text: string,
-  isConcurrentMode: boolean,
-) {
-  if (__DEV__) {
-    if (isConcurrentMode || parentProps[SUPPRESS_HYDRATION_WARNING] !== true) {
-      warnForInsertedHydratedText(parentInstance, text);
-    }
-  }
-}
-
-export function didNotFindHydratableSuspenseInstance(
-  parentType: string,
-  parentProps: Props,
-  parentInstance: Instance,
-) {
-  if (__DEV__) {
-    // TODO: warnForInsertedHydratedSuspense(parentInstance);
-  }
-}
-
-export function errorHydratingContainer(parentContainer: Container): void {
-  if (__DEV__) {
-    // TODO: This gets logged by onRecoverableError, too, so we should be
-    // able to remove it.
-    console.error(
-      'An error occurred during hydration. The server HTML was replaced with client content in <%s>.',
-      parentContainer.nodeName.toLowerCase(),
-    );
-  }
+  return parentType !== 'form' && parentType !== 'button';
 }
 
 // -------------------
@@ -1767,7 +3287,10 @@ export function isHiddenSubtree(fiber: Fiber): boolean {
   return fiber.tag === HostComponent && fiber.memoizedProps.hidden === true;
 }
 
-export function setFocusIfFocusable(node: Instance): boolean {
+export function setFocusIfFocusable(
+  node: Instance,
+  focusOptions?: FocusOptions,
+): boolean {
   // The logic for determining if an element is focusable is kind of complex,
   // and since we want to actually change focus anyway- we can just skip it.
   // Instead we'll just listen for a "focus" event to verify that focus was set.
@@ -1783,7 +3306,7 @@ export function setFocusIfFocusable(node: Instance): boolean {
   try {
     element.addEventListener('focus', handleFocus);
     // $FlowFixMe[method-unbinding]
-    (element.focus || HTMLElement.prototype.focus).call(element);
+    (element.focus || HTMLElement.prototype.focus).call(element, focusOptions);
   } finally {
     element.removeEventListener('focus', handleFocus);
   }
@@ -1932,8 +3455,15 @@ export function acquireSingletonInstance(
   internalInstanceHandle: Object,
 ): void {
   if (__DEV__) {
-    const currentInstanceHandle = getInstanceFromNodeDOMTree(instance);
-    if (currentInstanceHandle) {
+    if (
+      // If this instance is the container then it is invalid to acquire it as a singleton however
+      // the DOM nesting validation will already warn for this and the message below isn't semantically
+      // aligned with the actual fix you need to make so we omit the warning in this case
+      !isContainerMarkedAsRoot(instance) &&
+      // If this instance isn't the root but is currently owned by a different HostSingleton instance then
+      // we we need to warn that you are rendering more than one singleton at a time.
+      getInstanceFromNodeDOMTree(instance)
+    ) {
       const tagName = instance.tagName.toLowerCase();
       console.error(
         'You are mounting a new %s component when a previous one has not first unmounted. It is an' +
@@ -1975,30 +3505,6 @@ export function releaseSingletonInstance(instance: Instance): void {
     instance.removeAttributeNode(attributes[0]);
   }
   detachDeletedInstance(instance);
-}
-
-export function clearSingleton(instance: Instance): void {
-  const element: Element = (instance: any);
-  let node = element.firstChild;
-  while (node) {
-    const nextNode = node.nextSibling;
-    const nodeName = node.nodeName;
-    if (
-      isMarkedHoistable(node) ||
-      nodeName === 'HEAD' ||
-      nodeName === 'BODY' ||
-      nodeName === 'SCRIPT' ||
-      nodeName === 'STYLE' ||
-      (nodeName === 'LINK' &&
-        ((node: any): HTMLLinkElement).rel.toLowerCase() === 'stylesheet')
-    ) {
-      // retain these nodes
-    } else {
-      element.removeChild(node);
-    }
-    node = nextNode;
-  }
-  return;
 }
 
 // -------------------
@@ -2085,10 +3591,13 @@ export type HoistableRoot = Document | ShadowRoot;
 export function getHoistableRoot(container: Container): HoistableRoot {
   // $FlowFixMe[method-unbinding]
   return typeof container.getRootNode === 'function'
-    ? /* $FlowFixMe[incompatible-return] Flow types this as returning a `Node`,
+    ? /* $FlowFixMe[incompatible-cast] Flow types this as returning a `Node`,
        * but it's either a `Document` or `ShadowRoot`. */
-      container.getRootNode()
-    : container.ownerDocument;
+      (container.getRootNode(): Document | ShadowRoot)
+    : container.nodeType === DOCUMENT_NODE
+      ? // $FlowFixMe[incompatible-cast] We've constrained this to be a Document which satisfies the return type
+        (container: Document)
+      : container.ownerDocument;
 }
 
 function getCurrentResourceRoot(): null | HoistableRoot {
@@ -2100,18 +3609,52 @@ function getDocumentFromRoot(root: HoistableRoot): Document {
   return root.ownerDocument || root;
 }
 
-// We want this to be the default dispatcher on ReactDOMSharedInternals but we don't want to mutate
-// internals in Module scope. Instead we export it and Internals will import it. There is already a cycle
-// from Internals -> ReactDOM -> HostConfig -> Internals so this doesn't introduce a new one.
-export const ReactDOMClientDispatcher: HostDispatcher = {
-  prefetchDNS,
-  preconnect,
-  preload,
-  preloadModule,
-  preinitStyle,
-  preinitScript,
-  preinitModuleScript,
+const previousDispatcher =
+  ReactDOMSharedInternals.d; /* ReactDOMCurrentDispatcher */
+ReactDOMSharedInternals.d /* ReactDOMCurrentDispatcher */ = {
+  f /* flushSyncWork */: disableLegacyMode
+    ? flushSyncWork
+    : previousDispatcher.f /* flushSyncWork */,
+  r: requestFormReset,
+  D /* prefetchDNS */: prefetchDNS,
+  C /* preconnect */: preconnect,
+  L /* preload */: preload,
+  m /* preloadModule */: preloadModule,
+  X /* preinitScript */: preinitScript,
+  S /* preinitStyle */: preinitStyle,
+  M /* preinitModuleScript */: preinitModuleScript,
 };
+
+function flushSyncWork() {
+  if (disableLegacyMode) {
+    const previousWasRendering = previousDispatcher.f(); /* flushSyncWork */
+    const wasRendering = flushSyncWorkOnAllRoots();
+    // Since multiple dispatchers can flush sync work during a single flushSync call
+    // we need to return true if any of them were rendering.
+    return previousWasRendering || wasRendering;
+  } else {
+    throw new Error(
+      'flushSyncWork should not be called from builds that support legacy mode. This is a bug in React.',
+    );
+  }
+}
+
+function requestFormReset(form: HTMLFormElement) {
+  const formInst = getInstanceFromNodeDOMTree(form);
+  if (
+    formInst !== null &&
+    formInst.tag === HostComponent &&
+    formInst.type === 'form'
+  ) {
+    requestFormResetOnFiber(formInst);
+  } else {
+    // This form was either not rendered by this React renderer (or it's an
+    // invalid type). Try the next one.
+    //
+    // The last implementation in the sequence will throw an error.
+    previousDispatcher.r(/* requestFormReset */ form);
+  }
+}
 
 // We expect this to get inlined. It is a function mostly to communicate the special nature of
 // how we resolve the HoistableRoot for ReactDOM.pre*() methods. Because we support calling
@@ -2119,8 +3662,9 @@ export const ReactDOMClientDispatcher: HostDispatcher = {
 // and so we have to fall back to something universal. Currently we just refer to the global document.
 // This is notable because nowhere else in ReactDOM do we actually reference the global document or window
 // because we may be rendering inside an iframe.
-function getDocumentForImperativeFloatMethods(): Document {
-  return document;
+const globalDocument = typeof document === 'undefined' ? null : document;
+function getGlobalDocument(): ?Document {
+  return globalDocument;
 }
 
 function preconnectAs(
@@ -2128,8 +3672,8 @@ function preconnectAs(
   href: string,
   crossOrigin: ?CrossOriginEnum,
 ) {
-  const ownerDocument = getDocumentForImperativeFloatMethods();
-  if (typeof href === 'string' && href) {
+  const ownerDocument = getGlobalDocument();
+  if (ownerDocument && typeof href === 'string' && href) {
     const limitedEscapedHref =
       escapeSelectorAttributeValueInsideDoubleQuotes(href);
     let key = `link[rel="${rel}"][href="${limitedEscapedHref}"]`;
@@ -2151,25 +3695,19 @@ function preconnectAs(
 }
 
 function prefetchDNS(href: string) {
-  if (!enableFloat) {
-    return;
-  }
+  previousDispatcher.D(/* prefetchDNS */ href);
   preconnectAs('dns-prefetch', href, null);
 }
 
 function preconnect(href: string, crossOrigin?: ?CrossOriginEnum) {
-  if (!enableFloat) {
-    return;
-  }
+  previousDispatcher.C(/* preconnect */ href, crossOrigin);
   preconnectAs('preconnect', href, crossOrigin);
 }
 
 function preload(href: string, as: string, options?: ?PreloadImplOptions) {
-  if (!enableFloat) {
-    return;
-  }
-  const ownerDocument = getDocumentForImperativeFloatMethods();
-  if (href && as && ownerDocument) {
+  previousDispatcher.L(/* preload */ href, as, options);
+  const ownerDocument = getGlobalDocument();
+  if (ownerDocument && href && as) {
     let preloadSelector = `link[rel="preload"][as="${escapeSelectorAttributeValueInsideDoubleQuotes(
       as,
     )}"]`;
@@ -2245,11 +3783,9 @@ function preload(href: string, as: string, options?: ?PreloadImplOptions) {
 }
 
 function preloadModule(href: string, options?: ?PreloadModuleImplOptions) {
-  if (!enableFloat) {
-    return;
-  }
-  const ownerDocument = getDocumentForImperativeFloatMethods();
-  if (href) {
+  previousDispatcher.m(/* preloadModule */ href, options);
+  const ownerDocument = getGlobalDocument();
+  if (ownerDocument && href) {
     const as =
       options && typeof options.as === 'string' ? options.as : 'script';
     const preloadSelector = `link[rel="modulepreload"][as="${escapeSelectorAttributeValueInsideDoubleQuotes(
@@ -2308,12 +3844,10 @@ function preinitStyle(
   precedence: ?string,
   options?: ?PreinitStyleOptions,
 ) {
-  if (!enableFloat) {
-    return;
-  }
-  const ownerDocument = getDocumentForImperativeFloatMethods();
+  previousDispatcher.S(/* preinitStyle */ href, precedence, options);
 
-  if (href) {
+  const ownerDocument = getGlobalDocument();
+  if (ownerDocument && href) {
     const styles = getResourcesFromRoot(ownerDocument).hoistableStyles;
 
     const key = getStyleKey(href);
@@ -2384,12 +3918,10 @@ function preinitStyle(
 }
 
 function preinitScript(src: string, options?: ?PreinitScriptOptions) {
-  if (!enableFloat) {
-    return;
-  }
-  const ownerDocument = getDocumentForImperativeFloatMethods();
+  previousDispatcher.X(/* preinitScript */ src, options);
 
-  if (src) {
+  const ownerDocument = getGlobalDocument();
+  if (ownerDocument && src) {
     const scripts = getResourcesFromRoot(ownerDocument).hoistableScripts;
 
     const key = getScriptKey(src);
@@ -2442,12 +3974,10 @@ function preinitModuleScript(
   src: string,
   options?: ?PreinitModuleScriptOptions,
 ) {
-  if (!enableFloat) {
-    return;
-  }
-  const ownerDocument = getDocumentForImperativeFloatMethods();
+  previousDispatcher.M(/* preinitModuleScript */ src, options);
 
-  if (src) {
+  const ownerDocument = getGlobalDocument();
+  if (ownerDocument && src) {
     const scripts = getResourcesFromRoot(ownerDocument).hoistableScripts;
 
     const key = getScriptKey(src);
@@ -2515,6 +4045,7 @@ export function getResource(
   type: string,
   currentProps: any,
   pendingProps: any,
+  currentResource: null | Resource,
 ): null | Resource {
   const resourceRoot = getCurrentResourceRoot();
   if (!resourceRoot) {
@@ -2568,7 +4099,7 @@ export function getResource(
         if (!resource) {
           // We asserted this above but Flow can't figure out that the type satisfies
           const ownerDocument = getDocumentFromRoot(resourceRoot);
-          resource = {
+          resource = ({
             type: 'stylesheet',
             instance: null,
             count: 0,
@@ -2576,25 +4107,85 @@ export function getResource(
               loading: NotLoaded,
               preload: null,
             },
-          };
+          }: StylesheetResource);
           styles.set(key, resource);
+          const instance = ownerDocument.querySelector(
+            getStylesheetSelectorFromKey(key),
+          );
+          if (instance) {
+            const loadingState: ?Promise<mixed> = (instance: any)._p;
+            if (loadingState) {
+              // This instance is inserted as part of a boundary reveal and is not yet
+              // loaded
+            } else {
+              // This instance is already loaded
+              resource.instance = instance;
+              resource.state.loading = Loaded | Inserted;
+            }
+          }
+
           if (!preloadPropsMap.has(key)) {
-            preloadStylesheet(
-              ownerDocument,
-              key,
-              preloadPropsFromStylesheet(qualifiedProps),
-              resource.state,
-            );
+            const preloadProps = preloadPropsFromStylesheet(qualifiedProps);
+            preloadPropsMap.set(key, preloadProps);
+            if (!instance) {
+              preloadStylesheet(
+                ownerDocument,
+                key,
+                preloadProps,
+                resource.state,
+              );
+            }
           }
         }
+        if (currentProps && currentResource === null) {
+          // This node was previously an Instance type and is becoming a Resource type
+          // For now we error because we don't support flavor changes
+          let diff = '';
+          if (__DEV__) {
+            diff = `
+
+  - ${describeLinkForResourceErrorDEV(currentProps)}
+  + ${describeLinkForResourceErrorDEV(pendingProps)}`;
+          }
+          throw new Error(
+            'Expected <link> not to update to be updated to a stylesheet with precedence.' +
+              ' Check the `rel`, `href`, and `precedence` props of this component.' +
+              ' Alternatively, check whether two different <link> components render in the same slot or share the same key.' +
+              diff,
+          );
+        }
         return resource;
+      } else {
+        if (currentProps && currentResource !== null) {
+          // This node was previously a Resource type and is becoming an Instance type
+          // For now we error because we don't support flavor changes
+          let diff = '';
+          if (__DEV__) {
+            diff = `
+
+  - ${describeLinkForResourceErrorDEV(currentProps)}
+  + ${describeLinkForResourceErrorDEV(pendingProps)}`;
+          }
+          throw new Error(
+            'Expected stylesheet with precedence to not be updated to a different kind of <link>.' +
+              ' Check the `rel`, `href`, and `precedence` props of this component.' +
+              ' Alternatively, check whether two different <link> components render in the same slot or share the same key.' +
+              diff,
+          );
+        }
+        return null;
       }
-      return null;
     }
     case 'script': {
-      if (typeof pendingProps.src === 'string' && pendingProps.async === true) {
-        const scriptProps: ScriptProps = pendingProps;
-        const key = getScriptKey(scriptProps.src);
+      const async = pendingProps.async;
+      const src = pendingProps.src;
+      if (
+        typeof src === 'string' &&
+        async &&
+        typeof async !== 'function' &&
+        typeof async !== 'symbol'
+      ) {
+        const key = getScriptKey(src);
         const scripts = getResourcesFromRoot(resourceRoot).hoistableScripts;
 
         let resource = scripts.get(key);
@@ -2622,6 +4213,49 @@ export function getResource(
       );
     }
   }
+}
+
+function describeLinkForResourceErrorDEV(props: any) {
+  if (__DEV__) {
+    let describedProps = 0;
+
+    let description = '<link';
+    if (typeof props.rel === 'string') {
+      describedProps++;
+      description += ` rel="${props.rel}"`;
+    } else if (hasOwnProperty.call(props, 'rel')) {
+      describedProps++;
+      description += ` rel="${
+        props.rel === null ? 'null' : 'invalid type ' + typeof props.rel
+      }"`;
+    }
+    if (typeof props.href === 'string') {
+      describedProps++;
+      description += ` href="${props.href}"`;
+    } else if (hasOwnProperty.call(props, 'href')) {
+      describedProps++;
+      description += ` href="${
+        props.href === null ? 'null' : 'invalid type ' + typeof props.href
+      }"`;
+    }
+    if (typeof props.precedence === 'string') {
+      describedProps++;
+      description += ` precedence="${props.precedence}"`;
+    } else if (hasOwnProperty.call(props, 'precedence')) {
+      describedProps++;
+      description += ` precedence={${
+        props.precedence === null
+          ? 'null'
+          : 'invalid type ' + typeof props.precedence
+      }}`;
+    }
+    if (Object.getOwnPropertyNames(props).length > describedProps) {
+      description += ' ...';
+    }
+    description += ' />';
+    return description;
+  }
+  return '';
 }
 
 function styleTagPropsFromRawProps(
@@ -2671,28 +4305,21 @@ function preloadStylesheet(
   preloadProps: PreloadProps,
   state: StylesheetState,
 ) {
-  preloadPropsMap.set(key, preloadProps);
-
-  if (!ownerDocument.querySelector(getStylesheetSelectorFromKey(key))) {
-    // There is no matching stylesheet instance in the Document.
-    // We will insert a preload now to kick off loading because
-    // we expect this stylesheet to commit
-    const preloadEl = ownerDocument.querySelector(
-      getPreloadStylesheetSelectorFromKey(key),
-    );
-    if (preloadEl) {
-      // If we find a preload already it was SSR'd and we won't have an actual
-      // loading state to track. For now we will just assume it is loaded
-      state.loading = Loaded;
-    } else {
-      const instance = ownerDocument.createElement('link');
-      state.preload = instance;
-      instance.addEventListener('load', () => (state.loading |= Loaded));
-      instance.addEventListener('error', () => (state.loading |= Errored));
-      setInitialProperties(instance, 'link', preloadProps);
-      markNodeAsHoistable(instance);
-      (ownerDocument.head: any).appendChild(instance);
-    }
+  const preloadEl = ownerDocument.querySelector(
+    getPreloadStylesheetSelectorFromKey(key),
+  );
+  if (preloadEl) {
+    // If we find a preload already it was SSR'd and we won't have an actual
+    // loading state to track. For now we will just assume it is loaded
+    state.loading = Loaded;
+  } else {
+    const instance = ownerDocument.createElement('link');
+    state.preload = instance;
+    instance.addEventListener('load', () => (state.loading |= Loaded));
+    instance.addEventListener('error', () => (state.loading |= Errored));
+    setInitialProperties(instance, 'link', preloadProps);
+    markNodeAsHoistable(instance);
+    (ownerDocument.head: any).appendChild(instance);
   }
 }
 
@@ -2970,7 +4597,7 @@ export function hydrateHoistable(
           const node = nodes[i];
           if (
             node.getAttribute('href') !==
-              (props.href == null ? null : props.href) ||
+              (props.href == null || props.href === '' ? null : props.href) ||
             node.getAttribute('rel') !==
               (props.rel == null ? null : props.rel) ||
             node.getAttribute('title') !==
@@ -3172,10 +4799,9 @@ export function isHostHoistableType(
             console.error(
               'Cannot render a <style> outside the main document without knowing its precedence and a unique href key.' +
                 ' React can hoist and deduplicate <style> tags if you provide a `precedence` prop along with an `href` prop that' +
-                ' does not conflic with the `href` values used in any other hoisted <style> or <link rel="stylesheet" ...> tags. ' +
+                ' does not conflict with the `href` values used in any other hoisted <style> or <link rel="stylesheet" ...> tags. ' +
                 ' Note that hoisting <style> tags is considered an advanced feature that most will not use directly.' +
-                ' Consider moving the <style> tag to the <head> or consider adding a `precedence="default"` and `href="some unique resource identifier"`, or move the <style>' +
-                ' to the <style> tag.',
+                ' Consider moving the <style> tag to the <head> or consider adding a `precedence="default"` and `href="some unique resource identifier"`.',
             );
           }
         }
@@ -3240,16 +4866,20 @@ export function isHostHoistableType(
       }
     }
     case 'script': {
+      const isAsync =
+        props.async &&
+        typeof props.async !== 'function' &&
+        typeof props.async !== 'symbol';
       if (
-        props.async !== true ||
+        !isAsync ||
         props.onLoad ||
         props.onError ||
-        typeof props.src !== 'string' ||
-        !props.src
+        !props.src ||
+        typeof props.src !== 'string'
       ) {
         if (__DEV__) {
           if (outsideHostContainerContext) {
-            if (props.async !== true) {
+            if (!isAsync) {
               console.error(
                 'Cannot render a sync or defer <script> outside the main document without knowing its order.' +
                   ' Try adding async="" or moving it into the root <head> tag.',
@@ -3301,7 +4931,6 @@ export function mayResourceSuspendCommit(resource: Resource): boolean {
 }
 
 export function preloadInstance(type: Type, props: Props): boolean {
-  // Return true to indicate it's already loaded
   return true;
 }
 
@@ -3310,10 +4939,11 @@ export function preloadResource(resource: Resource): boolean {
     resource.type === 'stylesheet' &&
     (resource.state.loading & Settled) === NotLoaded
   ) {
-    // we have not finished loading the underlying stylesheet yet.
+    // Return false to indicate this resource should suspend
     return false;
   }
-  // Return true to indicate it's already loaded
+
+  // Return true to indicate this resource should not suspend
   return true;
 }
 
@@ -3432,7 +5062,28 @@ export function suspendResource(
   }
 }
 
-export function waitForCommitToBeReady(): null | (Function => Function) {
+export function suspendOnActiveViewTransition(rootContainer: Container): void {
+  if (suspendedState === null) {
+    throw new Error(
+      'Internal React Error: suspendedState null when it was expected to exists. Please report this as a React bug.',
+    );
+  }
+  const state = suspendedState;
+  const ownerDocument =
+    rootContainer.nodeType === DOCUMENT_NODE
+      ? rootContainer
+      : rootContainer.ownerDocument;
+  // $FlowFixMe[prop-missing]
+  const activeViewTransition = ownerDocument.__reactViewTransition;
+  if (activeViewTransition == null) {
+    return;
+  }
+  state.count++;
+  const ping = onUnsuspend.bind(state);
+  activeViewTransition.finished.then(ping, ping);
+}
+
+export function waitForCommitToBeReady(): null | ((() => void) => () => void) {
   if (suspendedState === null) {
     throw new Error(
       'Internal React Error: suspendedState null when it was expected to exists. Please report this as a React bug.',
@@ -3498,10 +5149,20 @@ function onUnsuspend(this: SuspendedState) {
   }
 }
 
+// We use a value that is type distinct from precedence to track which one is last.
+// This ensures there is no collision with user defined precedences. Normally we would
+// just track this in module scope but since the precedences are tracked per HoistableRoot
+// we need to associate it to something other than a global scope hence why we try to
+// colocate it with the map of precedences in the first place
+const LAST_PRECEDENCE = null;
+
 // This is typecast to non-null because it will always be set before read.
 // it is important that this not be used except when the stack guarantees it exists.
 // Currentlyt his is only during insertSuspendedStylesheet.
-let precedencesByRoot: Map<HoistableRoot, Map<string, Instance>> = (null: any);
+let precedencesByRoot: Map<
+  HoistableRoot,
+  Map<string | typeof LAST_PRECEDENCE, Instance>,
+> = (null: any);
 
 function insertSuspendedStylesheets(
   state: SuspendedState,
@@ -3551,20 +5212,20 @@ function insertStylesheetIntoRoot(
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i];
       if (
-        node.nodeName === 'link' ||
+        node.nodeName === 'LINK' ||
         // We omit style tags with media="not all" because they are not in the right position
         // and will be hoisted by the Fizz runtime imminently.
         node.getAttribute('media') !== 'not all'
       ) {
-        precedences.set('p' + node.dataset.precedence, node);
+        precedences.set(node.dataset.precedence, node);
         last = node;
       }
     }
     if (last) {
-      precedences.set('last', last);
+      precedences.set(LAST_PRECEDENCE, last);
     }
   } else {
-    last = precedences.get('last');
+    last = precedences.get(LAST_PRECEDENCE);
   }
 
   // We only call this after we have constructed an instance so we assume it here
@@ -3572,9 +5233,9 @@ function insertStylesheetIntoRoot(
   // We will always have a precedence for stylesheet instances
   const precedence: string = (instance.getAttribute('data-precedence'): any);
 
-  const prior = precedences.get('p' + precedence) || last;
+  const prior = precedences.get(precedence) || last;
   if (prior === last) {
-    precedences.set('last', instance);
+    precedences.set(LAST_PRECEDENCE, instance);
   }
   precedences.set(precedence, instance);
 
@@ -3596,3 +5257,16 @@ function insertStylesheetIntoRoot(
 }
 
 export const NotPendingTransition: TransitionStatus = NotPending;
+export const HostTransitionContext: ReactContext<TransitionStatus> = {
+  $$typeof: REACT_CONTEXT_TYPE,
+  Provider: (null: any),
+  Consumer: (null: any),
+  _currentValue: NotPendingTransition,
+  _currentValue2: NotPendingTransition,
+  _threadCount: 0,
+};
+
+export type FormInstance = HTMLFormElement;
+export function resetFormInstance(form: FormInstance): void {
+  form.reset();
+}

@@ -13,34 +13,40 @@
 // Use __VARIANT__ to simulate a GK. The tests will be run twice: once
 // with the __VARIANT__ set to `true`, and once set to `false`.
 
-export const disableInputAttributeSyncing = __VARIANT__;
-export const disableIEWorkarounds = __VARIANT__;
-export const enableLegacyFBSupport = __VARIANT__;
-export const enableUseRefAccessWarning = __VARIANT__;
-export const enableProfilerNestedUpdateScheduledHook = __VARIANT__;
-export const disableSchedulerTimeoutInWorkLoop = __VARIANT__;
-export const enableLazyContextPropagation = __VARIANT__;
-export const forceConcurrentByDefaultForTesting = __VARIANT__;
-export const enableUnifiedSyncLane = __VARIANT__;
-export const enableTransitionTracing = __VARIANT__;
-export const enableCustomElementPropertySupport = __VARIANT__;
-export const enableDeferRootSchedulingToMicrotask = __VARIANT__;
-export const enableAsyncActions = __VARIANT__;
 export const alwaysThrottleRetries = __VARIANT__;
+export const disableDefaultPropsExceptForClasses = __VARIANT__;
+export const disableLegacyContextForFunctionComponents = __VARIANT__;
+export const disableSchedulerTimeoutInWorkLoop = __VARIANT__;
 export const enableDO_NOT_USE_disableStrictPassiveEffect = __VARIANT__;
-export const enableUseDeferredValueInitialArg = __VARIANT__;
-
-// Enable this flag to help with concurrent mode debugging.
-// It logs information to the console about React scheduling, rendering, and commit phases.
-//
-// NOTE: This feature will only work in DEV mode; all callsites are wrapped with __DEV__.
-export const enableDebugTracing = __EXPERIMENTAL__;
+export const enableHiddenSubtreeInsertionEffectCleanup = __VARIANT__;
+export const enableNoCloningMemoCache = __VARIANT__;
+export const enableObjectFiber = __VARIANT__;
+export const enableRenderableContext = __VARIANT__;
+export const enableRetryLaneExpiration = __VARIANT__;
+export const enableTransitionTracing = __VARIANT__;
+export const favorSafetyOverHydrationPerf = __VARIANT__;
+export const renameElementSymbol = __VARIANT__;
+export const retryLaneExpirationMs = 5000;
+export const syncLaneExpirationMs = 250;
+export const transitionLaneExpirationMs = 5000;
 
 export const enableSchedulingProfiler = __VARIANT__;
 
-// These are already tested in both modes using the build type dimension,
-// so we don't need to use __VARIANT__ to get extra coverage.
-export const replayFailedUnitOfWorkWithInvokeGuardedCallback = __DEV__;
+export const enableInfiniteRenderLoopDetection = __VARIANT__;
+export const enableSiblingPrerendering = __VARIANT__;
+
+export const enableUseEffectCRUDOverload = __VARIANT__;
+export const enableFastAddPropertiesInDiffing = __VARIANT__;
+export const enableLazyPublicInstanceInFabric = false;
+export const enableViewTransition = __VARIANT__;
+export const enableComponentPerformanceTrack = __VARIANT__;
+export const enableScrollEndPolyfill = __VARIANT__;
+export const enableFragmentRefs = __VARIANT__;
+
+export const ownerStackLimit: number = __VARIANT__
+  ? // Some value that doesn't impact existing tests
+    500
+  : 1e4;
 
 // TODO: These flags are hard-coded to the default values used in open source.
 // Update the tests so that they pass in either mode, then set these

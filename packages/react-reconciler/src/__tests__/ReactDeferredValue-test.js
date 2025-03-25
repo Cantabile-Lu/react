@@ -16,7 +16,7 @@ let useDeferredValue;
 let useMemo;
 let useState;
 let Suspense;
-let Offscreen;
+let Activity;
 let assertLog;
 let waitForPaint;
 let textCache;
@@ -34,7 +34,7 @@ describe('ReactDeferredValue', () => {
     useMemo = React.useMemo;
     useState = React.useState;
     Suspense = React.Suspense;
-    Offscreen = React.unstable_Offscreen;
+    Activity = React.unstable_Activity;
 
     const InternalTestUtils = require('internal-test-utils');
     assertLog = InternalTestUtils.assertLog;
@@ -371,7 +371,6 @@ describe('ReactDeferredValue', () => {
     });
   });
 
-  // @gate enableUseDeferredValueInitialArg
   it('supports initialValue argument', async () => {
     function App() {
       const value = useDeferredValue('Final', 'Initial');
@@ -388,7 +387,6 @@ describe('ReactDeferredValue', () => {
     expect(root).toMatchRenderedOutput('Final');
   });
 
-  // @gate enableUseDeferredValueInitialArg
   it('defers during initial render when initialValue is provided, even if render is not sync', async () => {
     function App() {
       const value = useDeferredValue('Final', 'Initial');
@@ -406,10 +404,9 @@ describe('ReactDeferredValue', () => {
     expect(root).toMatchRenderedOutput('Final');
   });
 
-  // @gate enableUseDeferredValueInitialArg
   it(
     'if a suspended render spawns a deferred task, we can switch to the ' +
-      'deferred task without finishing the original one',
+      'deferred task without finishing the original one (no Suspense boundary)',
     async () => {
       function App() {
         const text = useDeferredValue('Final', 'Loading...');
@@ -423,6 +420,10 @@ describe('ReactDeferredValue', () => {
         // The initial value suspended, so we attempt the final value, which
         // also suspends.
         'Suspend! [Final]',
+
+        ...(gate('enableSiblingPrerendering')
+          ? ['Suspend! [Loading...]', 'Suspend! [Final]']
+          : []),
       ]);
       expect(root).toMatchRenderedOutput(null);
 
@@ -439,7 +440,91 @@ describe('ReactDeferredValue', () => {
     },
   );
 
-  // @gate enableUseDeferredValueInitialArg
+  it(
+    'if a suspended render spawns a deferred task, we can switch to the ' +
+      'deferred task without finishing the original one (no Suspense boundary, ' +
+      'synchronous parent update)',
+    async () => {
+      function App() {
+        const text = useDeferredValue('Final', 'Loading...');
+        return <AsyncText text={text} />;
+      }
+
+      const root = ReactNoop.createRoot();
+      // TODO: This made me realize that we don't warn if an update spawns a
+      // deferred task without being wrapped with `act`. Usually it would work
+      // anyway because the parent task has to wrapped with `act`... but not
+      // if it was flushed with `flushSync` instead.
+      await act(() => {
+        ReactNoop.flushSync(() => root.render(<App />));
+      });
+      assertLog([
+        'Suspend! [Loading...]',
+        // The initial value suspended, so we attempt the final value, which
+        // also suspends.
+        'Suspend! [Final]',
+
+        ...(gate('enableSiblingPrerendering')
+          ? ['Suspend! [Loading...]', 'Suspend! [Final]']
+          : []),
+      ]);
+      expect(root).toMatchRenderedOutput(null);
+
+      // The final value loads, so we can skip the initial value entirely.
+      await act(() => resolveText('Final'));
+      assertLog(['Final']);
+      expect(root).toMatchRenderedOutput('Final');
+
+      // When the initial value finally loads, nothing happens because we no
+      // longer need it.
+      await act(() => resolveText('Loading...'));
+      assertLog([]);
+      expect(root).toMatchRenderedOutput('Final');
+    },
+  );
+
+  it(
+    'if a suspended render spawns a deferred task, we can switch to the ' +
+      'deferred task without finishing the original one (Suspense boundary)',
+    async () => {
+      function App() {
+        const text = useDeferredValue('Final', 'Loading...');
+        return <AsyncText text={text} />;
+      }
+
+      const root = ReactNoop.createRoot();
+      await act(() =>
+        root.render(
+          <Suspense fallback={<Text text="Fallback" />}>
+            <App />
+          </Suspense>,
+        ),
+      );
+      assertLog([
+        'Suspend! [Loading...]',
+        'Fallback',
+
+        // The initial value suspended, so we attempt the final value, which
+        // also suspends.
+        'Suspend! [Final]',
+
+        ...(gate('enableSiblingPrerendering') ? ['Suspend! [Final]'] : []),
+      ]);
+      expect(root).toMatchRenderedOutput('Fallback');
+
+      // The final value loads, so we can skip the initial value entirely.
+      await act(() => resolveText('Final'));
+      assertLog(['Final']);
+      expect(root).toMatchRenderedOutput('Final');
+
+      // When the initial value finally loads, nothing happens because we no
+      // longer need it.
+      await act(() => resolveText('Loading...'));
+      assertLog([]);
+      expect(root).toMatchRenderedOutput('Final');
+    },
+  );
+
   it(
     'if a suspended render spawns a deferred task that also suspends, we can ' +
       'finish the original task if that one loads first',
@@ -456,6 +541,10 @@ describe('ReactDeferredValue', () => {
         // The initial value suspended, so we attempt the final value, which
         // also suspends.
         'Suspend! [Final]',
+
+        ...(gate('enableSiblingPrerendering')
+          ? ['Suspend! [Loading...]', 'Suspend! [Final]']
+          : []),
       ]);
       expect(root).toMatchRenderedOutput(null);
 
@@ -475,7 +564,6 @@ describe('ReactDeferredValue', () => {
     },
   );
 
-  // @gate enableUseDeferredValueInitialArg
   it(
     'if there are multiple useDeferredValues in the same tree, only the ' +
       'first level defers; subsequent ones go straight to the final value, to ' +
@@ -523,7 +611,6 @@ describe('ReactDeferredValue', () => {
     },
   );
 
-  // @gate enableUseDeferredValueInitialArg
   it('avoids a useDeferredValue waterfall when separated by a Suspense boundary', async () => {
     // Same as the previous test but with a Suspense boundary separating the
     // two useDeferredValue hooks.
@@ -557,6 +644,8 @@ describe('ReactDeferredValue', () => {
       // go straight to attempting the final value.
       'Suspend! [Content]',
       'Loading...',
+
+      ...(gate('enableSiblingPrerendering') ? ['Suspend! [Content]'] : []),
     ]);
     // The content suspended, so we show a Suspense fallback
     expect(root).toMatchRenderedOutput('Loading...');
@@ -568,8 +657,7 @@ describe('ReactDeferredValue', () => {
     expect(root).toMatchRenderedOutput('Content');
   });
 
-  // @gate enableUseDeferredValueInitialArg
-  // @gate enableOffscreen
+  // @gate enableActivity
   it('useDeferredValue can spawn a deferred task while prerendering a hidden tree', async () => {
     function App() {
       const text = useDeferredValue('Final', 'Preview');
@@ -585,9 +673,7 @@ describe('ReactDeferredValue', () => {
       const [shouldShow, setState] = useState(false);
       revealContent = () => setState(true);
       return (
-        <Offscreen mode={shouldShow ? 'visible' : 'hidden'}>
-          {children}
-        </Offscreen>
+        <Activity mode={shouldShow ? 'visible' : 'hidden'}>{children}</Activity>
       );
     }
 
@@ -617,8 +703,7 @@ describe('ReactDeferredValue', () => {
     expect(root).toMatchRenderedOutput(<div>Final</div>);
   });
 
-  // @gate enableUseDeferredValueInitialArg
-  // @gate enableOffscreen
+  // @gate enableActivity
   it('useDeferredValue can prerender the initial value inside a hidden tree', async () => {
     function App({text}) {
       const renderedText = useDeferredValue(text, `Preview [${text}]`);
@@ -634,9 +719,7 @@ describe('ReactDeferredValue', () => {
       const [shouldShow, setState] = useState(false);
       revealContent = () => setState(true);
       return (
-        <Offscreen mode={shouldShow ? 'visible' : 'hidden'}>
-          {children}
-        </Offscreen>
+        <Activity mode={shouldShow ? 'visible' : 'hidden'}>{children}</Activity>
       );
     }
 
@@ -661,6 +744,7 @@ describe('ReactDeferredValue', () => {
         </Container>,
       );
       // We should switch to pre-rendering the new preview.
+      await waitForPaint([]);
       await waitForPaint(['Preview [B]']);
       expect(root).toMatchRenderedOutput(<div hidden={true}>Preview [B]</div>);
 
@@ -670,6 +754,10 @@ describe('ReactDeferredValue', () => {
       revealContent();
       // Because the preview state was already prerendered, we can reveal it
       // without any addditional work.
+      if (gate(flags => flags.enableYieldingBeforePassive)) {
+        // Passive effects.
+        await waitForPaint([]);
+      }
       await waitForPaint([]);
       expect(root).toMatchRenderedOutput(<div>Preview [B]</div>);
     });
@@ -678,8 +766,7 @@ describe('ReactDeferredValue', () => {
     expect(root).toMatchRenderedOutput(<div>B</div>);
   });
 
-  // @gate enableUseDeferredValueInitialArg
-  // @gate enableOffscreen
+  // @gate enableActivity
   it(
     'useDeferredValue skips the preview state when revealing a hidden tree ' +
       'if the final value is referentially identical',
@@ -695,9 +782,9 @@ describe('ReactDeferredValue', () => {
 
       function Container({text, shouldShow}) {
         return (
-          <Offscreen mode={shouldShow ? 'visible' : 'hidden'}>
+          <Activity mode={shouldShow ? 'visible' : 'hidden'}>
             <App text={text} />
-          </Offscreen>
+          </Activity>
         );
       }
 
@@ -719,8 +806,7 @@ describe('ReactDeferredValue', () => {
     },
   );
 
-  // @gate enableUseDeferredValueInitialArg
-  // @gate enableOffscreen
+  // @gate enableActivity
   it(
     'useDeferredValue does not skip the preview state when revealing a ' +
       'hidden tree if the final value is different from the currently rendered one',
@@ -736,9 +822,9 @@ describe('ReactDeferredValue', () => {
 
       function Container({text, shouldShow}) {
         return (
-          <Offscreen mode={shouldShow ? 'visible' : 'hidden'}>
+          <Activity mode={shouldShow ? 'visible' : 'hidden'}>
             <App text={text} />
-          </Offscreen>
+          </Activity>
         );
       }
 
@@ -765,7 +851,7 @@ describe('ReactDeferredValue', () => {
     },
   );
 
-  // @gate enableOffscreen
+  // @gate enableActivity
   it(
     'useDeferredValue does not show "previous" value when revealing a hidden ' +
       'tree (no initial value)',
@@ -781,9 +867,9 @@ describe('ReactDeferredValue', () => {
 
       function Container({text, shouldShow}) {
         return (
-          <Offscreen mode={shouldShow ? 'visible' : 'hidden'}>
+          <Activity mode={shouldShow ? 'visible' : 'hidden'}>
             <App text={text} />
-          </Offscreen>
+          </Activity>
         );
       }
 

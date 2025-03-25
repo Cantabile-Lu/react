@@ -7,8 +7,19 @@ module.exports = {
     '<rootDir>/scripts/bench/',
   ],
   transform: {
-    '.*': require.resolve('./preprocessor.js'),
+    '^.+babel-plugin-react-compiler/dist/index.js$': [
+      'babel-jest',
+      {
+        configFile: require.resolve('../../babel.config-react-compiler.js'),
+      },
+    ],
+    '^.+\\.ts$': [
+      'babel-jest',
+      {configFile: require.resolve('../../babel.config-ts.js')},
+    ],
+    '.(?!ts$)': require.resolve('./preprocessor.js'),
   },
+  prettierPath: require.resolve('prettier-2'),
   setupFiles: [require.resolve('./setupEnvironment.js')],
   setupFilesAfterEnv: [require.resolve('./setupTests.js')],
   // Only include files directly in __tests__, not in nested folders.
@@ -23,9 +34,7 @@ module.exports = {
   },
   snapshotSerializers: [require.resolve('jest-snapshot-serializer-raw')],
 
-  testSequencer: require.resolve('./jestSequencer'),
-
-  testEnvironment: 'jsdom',
+  testEnvironment: '<rootDir>/scripts/jest/ReactJSDOMEnvironment',
 
   testRunner: 'jest-circus/runner',
 };

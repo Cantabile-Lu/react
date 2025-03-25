@@ -52,14 +52,9 @@ import {
   enableLegacyFBSupport,
   enableCreateEventHandleAPI,
   enableScopeAPI,
-  enableFloat,
-  enableHostSingletons,
-  enableFormActions,
+  disableCommentsAsDOMContainers,
+  enableScrollEndPolyfill,
 } from 'shared/ReactFeatureFlags';
-import {
-  invokeGuardedCallbackAndCatchFirstError,
-  rethrowCaughtError,
-} from 'shared/ReactErrorUtils';
 import {createEventListenerWrapperWithPriority} from './ReactDOMEventListener';
 import {
   removeEventListener,
@@ -74,6 +69,11 @@ import * as EnterLeaveEventPlugin from './plugins/EnterLeaveEventPlugin';
 import * as SelectEventPlugin from './plugins/SelectEventPlugin';
 import * as SimpleEventPlugin from './plugins/SimpleEventPlugin';
 import * as FormActionEventPlugin from './plugins/FormActionEventPlugin';
+import * as ScrollEndEventPlugin from './plugins/ScrollEndEventPlugin';
+
+import reportGlobalError from 'shared/reportGlobalError';
+
+import {runWithFiberInDEV} from 'react-reconciler/src/ReactCurrentFiber';
 
 type DispatchListener = {
   instance: null | Fiber,
@@ -94,6 +94,9 @@ EnterLeaveEventPlugin.registerEvents();
 ChangeEventPlugin.registerEvents();
 SelectEventPlugin.registerEvents();
 BeforeInputEventPlugin.registerEvents();
+if (enableScrollEndPolyfill) {
+  ScrollEndEventPlugin.registerEvents();
+}
 
 function extractEvents(
   dispatchQueue: DispatchQueue,
@@ -175,17 +178,26 @@ function extractEvents(
       eventSystemFlags,
       targetContainer,
     );
-    if (enableFormActions) {
-      FormActionEventPlugin.extractEvents(
-        dispatchQueue,
-        domEventName,
-        targetInst,
-        nativeEvent,
-        nativeEventTarget,
-        eventSystemFlags,
-        targetContainer,
-      );
-    }
+    FormActionEventPlugin.extractEvents(
+      dispatchQueue,
+      domEventName,
+      targetInst,
+      nativeEvent,
+      nativeEventTarget,
+      eventSystemFlags,
+      targetContainer,
+    );
+  }
+  if (enableScrollEndPolyfill) {
+    ScrollEndEventPlugin.extractEvents(
+      dispatchQueue,
+      domEventName,
+      targetInst,
+      nativeEvent,
+      nativeEventTarget,
+      eventSystemFlags,
+      targetContainer,
+    );
   }
 }
 
@@ -221,6 +233,7 @@ export const mediaEventTypes: Array<DOMEventName> = [
 // set them on the actual target element itself. This is primarily
 // because these events do not consistently bubble in the DOM.
 export const nonDelegatedEvents: Set<DOMEventName> = new Set([
+  'beforetoggle',
   'cancel',
   'close',
   'invalid',
@@ -240,9 +253,12 @@ function executeDispatch(
   listener: Function,
   currentTarget: EventTarget,
 ): void {
-  const type = event.type || 'unknown-event';
   event.currentTarget = currentTarget;
-  invokeGuardedCallbackAndCatchFirstError(type, listener, undefined, event);
+  try {
+    listener(event);
+  } catch (error) {
+    reportGlobalError(error);
+  }
   event.currentTarget = null;
 }
 
@@ -258,7 +274,17 @@ function processDispatchQueueItemsInOrder(
       if (instance !== previousInstance && event.isPropagationStopped()) {
         return;
       }
-      executeDispatch(event, listener, currentTarget);
+      if (__DEV__ && instance !== null) {
+        runWithFiberInDEV(
+          instance,
+          executeDispatch,
+          event,
+          listener,
+          currentTarget,
+        );
+      } else {
+        executeDispatch(event, listener, currentTarget);
+      }
       previousInstance = instance;
     }
   } else {
@@ -267,7 +293,17 @@ function processDispatchQueueItemsInOrder(
       if (instance !== previousInstance && event.isPropagationStopped()) {
         return;
       }
-      executeDispatch(event, listener, currentTarget);
+      if (__DEV__ && instance !== null) {
+        runWithFiberInDEV(
+          instance,
+          executeDispatch,
+          event,
+          listener,
+          currentTarget,
+        );
+      } else {
+        executeDispatch(event, listener, currentTarget);
+      }
       previousInstance = instance;
     }
   }
@@ -283,8 +319,6 @@ export function processDispatchQueue(
     processDispatchQueueItemsInOrder(event, listeners, inCapturePhase);
     //  event system doesn't use pooling.
   }
-  // This would be a good time to rethrow if any of the event handlers threw.
-  rethrowCaughtError();
 }
 
 function dispatchEventsForPlugins(
@@ -540,7 +574,8 @@ function isMatchingRootContainer(
 ): boolean {
   return (
     grandContainer === targetContainer ||
-    (grandContainer.nodeType === COMMENT_NODE &&
+    (!disableCommentsAsDOMContainers &&
+      grandContainer.nodeType === COMMENT_NODE &&
       grandContainer.parentNode === targetContainer)
   );
 }
@@ -636,8 +671,8 @@ export function dispatchEventForPluginEventSystem(
             if (
               parentTag === HostComponent ||
               parentTag === HostText ||
-              (enableFloat ? parentTag === HostHoistable : false) ||
-              (enableHostSingletons ? parentTag === HostSingleton : false)
+              parentTag === HostHoistable ||
+              parentTag === HostSingleton
             ) {
               node = ancestorInst = parentNode;
               continue mainLoop;
@@ -694,8 +729,8 @@ export function accumulateSinglePhaseListeners(
     // Handle listeners that are on HostComponents (i.e. <div>)
     if (
       (tag === HostComponent ||
-        (enableFloat ? tag === HostHoistable : false) ||
-        (enableHostSingletons ? tag === HostSingleton : false)) &&
+        tag === HostHoistable ||
+        tag === HostSingleton) &&
       stateNode !== null
     ) {
       lastHostComponent = stateNode;
@@ -791,6 +826,7 @@ export function accumulateSinglePhaseListeners(
 // - BeforeInputEventPlugin
 // - ChangeEventPlugin
 // - SelectEventPlugin
+// - ScrollEndEventPlugin
 // This is because we only process these plugins
 // in the bubble phase, so we need to accumulate two
 // phase event listeners (via emulation).
@@ -808,8 +844,8 @@ export function accumulateTwoPhaseListeners(
     // Handle listeners that are on HostComponents (i.e. <div>)
     if (
       (tag === HostComponent ||
-        (enableFloat ? tag === HostHoistable : false) ||
-        (enableHostSingletons ? tag === HostSingleton : false)) &&
+        tag === HostHoistable ||
+        tag === HostSingleton) &&
       stateNode !== null
     ) {
       const currentTarget = stateNode;
@@ -826,9 +862,14 @@ export function accumulateTwoPhaseListeners(
         );
       }
     }
+    if (instance.tag === HostRoot) {
+      return listeners;
+    }
     instance = instance.return;
   }
-  return listeners;
+  // If we didn't reach the root it means we're unmounted and shouldn't
+  // dispatch any events on the target.
+  return [];
 }
 
 function getParent(inst: Fiber | null): Fiber | null {
@@ -843,11 +884,7 @@ function getParent(inst: Fiber | null): Fiber | null {
     // events to their parent. We could also go through parentNode on the
     // host node but that wouldn't work for React Native and doesn't let us
     // do the portal feature.
-  } while (
-    inst &&
-    inst.tag !== HostComponent &&
-    (!enableHostSingletons ? true : inst.tag !== HostSingleton)
-  );
+  } while (inst && inst.tag !== HostComponent && inst.tag !== HostSingleton);
   if (inst) {
     return inst;
   }
@@ -915,8 +952,8 @@ function accumulateEnterLeaveListenersForEvent(
     }
     if (
       (tag === HostComponent ||
-        (enableFloat ? tag === HostHoistable : false) ||
-        (enableHostSingletons ? tag === HostSingleton : false)) &&
+        tag === HostHoistable ||
+        tag === HostSingleton) &&
       stateNode !== null
     ) {
       const currentTarget = stateNode;

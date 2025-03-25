@@ -8,8 +8,15 @@
  */
 
 import type {ReactNodeList} from 'shared/ReactTypes';
-import type {BootstrapScriptDescriptor} from 'react-dom-bindings/src/server/ReactFizzConfigDOM';
-import type {PostponedState} from 'react-server/src/ReactFizzServer';
+import type {
+  BootstrapScriptDescriptor,
+  HeadersDescriptor,
+} from 'react-dom-bindings/src/server/ReactFizzConfigDOM';
+import type {
+  PostponedState,
+  ErrorInfo,
+  PostponeInfo,
+} from 'react-server/src/ReactFizzServer';
 import type {ImportMap} from '../shared/ReactDOMTypes';
 
 import {Writable, Readable} from 'stream';
@@ -18,6 +25,7 @@ import ReactVersion from 'shared/ReactVersion';
 
 import {
   createPrerenderRequest,
+  resumeAndPrerenderRequest,
   startWork,
   startFlowing,
   abort,
@@ -27,8 +35,14 @@ import {
 import {
   createResumableState,
   createRenderState,
+  resumeRenderState,
   createRootFormatContext,
 } from 'react-dom-bindings/src/server/ReactFizzConfigDOM';
+
+import {enablePostpone, enableHalt} from 'shared/ReactFeatureFlags';
+
+import {ensureCorrectIsomorphicReactVersion} from '../shared/ensureCorrectIsomorphicReactVersion';
+ensureCorrectIsomorphicReactVersion();
 
 type Options = {
   identifierPrefix?: string,
@@ -38,10 +52,12 @@ type Options = {
   bootstrapModules?: Array<string | BootstrapScriptDescriptor>,
   progressiveChunkSize?: number,
   signal?: AbortSignal,
-  onError?: (error: mixed) => ?string,
-  onPostpone?: (reason: string) => void,
+  onError?: (error: mixed, errorInfo: ErrorInfo) => ?string,
+  onPostpone?: (reason: string, postponeInfo: PostponeInfo) => void,
   unstable_externalRuntimeSrc?: string | BootstrapScriptDescriptor,
   importMap?: ImportMap,
+  onHeaders?: (headers: HeadersDescriptor) => void,
+  maxHeadersLength?: number,
 };
 
 type StaticResult = {
@@ -80,15 +96,23 @@ function prerenderToNodeStream(
       });
       const writable = createFakeWritable(readable);
 
-      const result = {
-        postponed: getPostponedState(request),
-        prelude: readable,
-      };
+      const result: StaticResult =
+        enablePostpone || enableHalt
+          ? {
+              postponed: getPostponedState(request),
+              prelude: readable,
+            }
+          : ({
+              prelude: readable,
+            }: any);
       resolve(result);
     }
     const resumableState = createResumableState(
       options ? options.identifierPrefix : undefined,
       options ? options.unstable_externalRuntimeSrc : undefined,
+      options ? options.bootstrapScriptContent : undefined,
+      options ? options.bootstrapScripts : undefined,
+      options ? options.bootstrapModules : undefined,
     );
     const request = createPrerenderRequest(
       children,
@@ -96,11 +120,10 @@ function prerenderToNodeStream(
       createRenderState(
         resumableState,
         undefined, // nonce is not compatible with prerendered bootstrap scripts
-        options ? options.bootstrapScriptContent : undefined,
-        options ? options.bootstrapScripts : undefined,
-        options ? options.bootstrapModules : undefined,
         options ? options.unstable_externalRuntimeSrc : undefined,
         options ? options.importMap : undefined,
+        options ? options.onHeaders : undefined,
+        options ? options.maxHeadersLength : undefined,
       ),
       createRootFormatContext(options ? options.namespaceURI : undefined),
       options ? options.progressiveChunkSize : undefined,
@@ -127,4 +150,67 @@ function prerenderToNodeStream(
   });
 }
 
-export {prerenderToNodeStream, ReactVersion as version};
+type ResumeOptions = {
+  nonce?: string,
+  signal?: AbortSignal,
+  onError?: (error: mixed, errorInfo: ErrorInfo) => ?string,
+  onPostpone?: (reason: string, postponeInfo: PostponeInfo) => void,
+};
+
+function resumeAndPrerenderToNodeStream(
+  children: ReactNodeList,
+  postponedState: PostponedState,
+  options?: ResumeOptions,
+): Promise<StaticResult> {
+  return new Promise((resolve, reject) => {
+    const onFatalError = reject;
+
+    function onAllReady() {
+      const readable: Readable = new Readable({
+        read() {
+          startFlowing(request, writable);
+        },
+      });
+      const writable = createFakeWritable(readable);
+
+      const result = {
+        postponed: getPostponedState(request),
+        prelude: readable,
+      };
+      resolve(result);
+    }
+    const request = resumeAndPrerenderRequest(
+      children,
+      postponedState,
+      resumeRenderState(
+        postponedState.resumableState,
+        options ? options.nonce : undefined,
+      ),
+      options ? options.onError : undefined,
+      onAllReady,
+      undefined,
+      undefined,
+      onFatalError,
+      options ? options.onPostpone : undefined,
+    );
+    if (options && options.signal) {
+      const signal = options.signal;
+      if (signal.aborted) {
+        abort(request, (signal: any).reason);
+      } else {
+        const listener = () => {
+          abort(request, (signal: any).reason);
+          signal.removeEventListener('abort', listener);
+        };
+        signal.addEventListener('abort', listener);
+      }
+    }
+    startWork(request);
+  });
+}
+
+export {
+  prerenderToNodeStream,
+  resumeAndPrerenderToNodeStream,
+  ReactVersion as version,
+};
