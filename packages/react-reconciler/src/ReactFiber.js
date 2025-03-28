@@ -132,7 +132,7 @@ if (__DEV__) {
     hasBadMapPolyfill = true;
   }
 }
-
+// 创建fiber对象
 function FiberNode(
   this: $FlowFixMe,
   tag: WorkTag,
@@ -230,7 +230,6 @@ function createFiberImplClass(
   // $FlowFixMe[invalid-constructor]: the shapes are exact here but Flow doesn't like constructors
   return new FiberNode(tag, pendingProps, key, mode);
 }
-
 function createFiberImplObject(
   tag: WorkTag,
   pendingProps: mixed,
@@ -538,7 +537,7 @@ export function createHostRootFiber(
     // Without some nodes in the tree having empty base times.
     mode |= ProfileMode;
   }
-
+  // 创建根Fiber入口函数
   return createFiber(HostRoot, null, null, mode);
 }
 

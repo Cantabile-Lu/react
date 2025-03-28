@@ -98,6 +98,7 @@ function ReactDOMRoot(internalRoot: FiberRoot) {
 }
 
 // $FlowFixMe[prop-missing] found when upgrading Flow
+// 为原型添加render 函数
 ReactDOMHydrationRoot.prototype.render = ReactDOMRoot.prototype.render =
   // $FlowFixMe[missing-this-annot]
   function (children: ReactNodeList): void {
@@ -161,7 +162,7 @@ ReactDOMHydrationRoot.prototype.unmount = ReactDOMRoot.prototype.unmount =
       unmarkContainerAsRoot(container);
     }
   };
-
+// 1：初始化函数调用
 export function createRoot(
   container: Element | Document | DocumentFragment,
   options?: CreateRootOptions,
@@ -169,9 +170,7 @@ export function createRoot(
   if (!isValidContainer(container)) {
     throw new Error('Target container is not a DOM element.');
   }
-
   warnIfReactDOMContainerInDEV(container);
-
   const concurrentUpdatesByDefaultOverride = false;
   let isStrictMode = false;
   let identifierPrefix = '';
@@ -221,7 +220,7 @@ export function createRoot(
       transitionCallbacks = options.unstable_transitionCallbacks;
     }
   }
-
+// 2：创建容器
   const root = createContainer(
     container,
     ConcurrentRoot,
@@ -240,6 +239,7 @@ export function createRoot(
     !disableCommentsAsDOMContainers && container.nodeType === COMMENT_NODE
       ? (container.parentNode: any)
       : container;
+  // 为root创建事件监听
   listenToAllSupportedEvents(rootContainerElement);
 
   // $FlowFixMe[invalid-constructor] Flow no longer supports calling new on functions

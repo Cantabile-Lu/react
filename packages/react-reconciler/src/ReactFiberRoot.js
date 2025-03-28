@@ -44,7 +44,7 @@ export type RootState = {
   isDehydrated: boolean,
   cache: Cache,
 };
-
+// 4: 构造FiberRootNode
 function FiberRootNode(
   this: $FlowFixMe,
   containerInfo: any,
@@ -142,7 +142,7 @@ function FiberRootNode(
     }
   }
 }
-
+//3：创建根fiber
 export function createFiberRoot(
   containerInfo: Container,
   tag: RootTag,
@@ -194,6 +194,7 @@ export function createFiberRoot(
 
   // Cyclic construction. This cheats the type system right now because
   // stateNode is any.
+  // 5: 根据模式调用函数创建fiber
   const uninitializedFiber = createHostRootFiber(tag, isStrictMode);
   root.current = uninitializedFiber;
   uninitializedFiber.stateNode = root;

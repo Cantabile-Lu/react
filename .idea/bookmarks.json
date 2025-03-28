@@ -1,0 +1,65 @@
+{
+  "createRoot": [
+    {
+      "fileDescriptor": "$/packages/react-dom/src/client/ReactDOMRoot.js",
+      "linenumber": 100,
+      "name": "// 为原型添加render 函数",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-dom/src/client/ReactDOMRoot.js",
+      "linenumber": 241,
+      "name": "// 为root创建事件监听",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-dom/src/client/ReactDOMRoot.js",
+      "linenumber": 222,
+      "name": "// 2：创建容器",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-dom/src/client/ReactDOMRoot.js",
+      "linenumber": 164,
+      "name": "// 1：初始化函数调用",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-reconciler/src/ReactFiberClassUpdateQueue.js",
+      "linenumber": 174,
+      "name": "// 初始化更新队列",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-reconciler/src/ReactFiber.js",
+      "linenumber": 134,
+      "name": "// 创建fiber对象",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-reconciler/src/ReactFiber.js",
+      "linenumber": 539,
+      "name": "// 创建根Fiber入口函数",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-reconciler/src/ReactFiberRoot.js",
+      "linenumber": 196,
+      "name": "// 5: 根据模式调用函数创建fiber",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-reconciler/src/ReactFiberRoot.js",
+      "linenumber": 144,
+      "name": "//3：创建根fiber",
+      "bookmarkType": "DEFAULT"
+    },
+    {
+      "fileDescriptor": "$/packages/react-reconciler/src/ReactFiberRoot.js",
+      "linenumber": 46,
+      "name": "// 4: 构造FiberRootNode",
+      "bookmarkType": "DEFAULT"
+    }
+  ],
+  "react": []
+}
