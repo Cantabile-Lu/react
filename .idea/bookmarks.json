@@ -61,5 +61,12 @@
       "bookmarkType": "DEFAULT"
     }
   ],
-  "react": []
+  "react": [
+    {
+      "fileDescriptor": "$/packages/react-reconciler/src/ReactFiberBeginWork.js",
+      "linenumber": 3815,
+      "name": "beginWork",
+      "bookmarkType": "DEFAULT"
+    }
+  ]
 }

@@ -27,6 +27,10 @@ const codeFrame = require('@babel/code-frame').default;
 const Wrappers = require('./wrappers');
 const commonjs = require('@rollup/plugin-commonjs');
 
+const path = require('path')
+
+
+
 const RELEASE_CHANNEL = process.env.RELEASE_CHANNEL;
 
 // Default to building in experimental mode. If the release channel is set via
@@ -218,6 +222,12 @@ function getRollupOutputOptions(
     name: globalName,
     sourcemap: true,
     esModule: false,
+    sourcemapPathTransform: (relativeSourcePath, sourcemapPath) => {
+      return path.resolve(
+        path.dirname(sourcemapPath),
+        relativeSourcePath
+      );
+    },
     exports: 'auto',
   };
 }
@@ -700,6 +710,8 @@ async function createBundle(bundle, bundleType) {
       freeze: false,
       interop: getRollupInteropValue,
       esModule: false,
+      sourcemap: true,
+      sourcemapBaseUrl: 'https://example.com',
     },
   };
   const mainOutputPath = Packaging.getBundleOutputPath(
