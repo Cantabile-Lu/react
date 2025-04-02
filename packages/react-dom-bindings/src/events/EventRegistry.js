@@ -68,7 +68,7 @@ export function registerDirectEvent(
       possibleRegistrationNames.ondblclick = registrationName;
     }
   }
-
+// allNativeEvents 添加事件
   for (let i = 0; i < dependencies.length; i++) {
     allNativeEvents.add(dependencies[i]);
   }

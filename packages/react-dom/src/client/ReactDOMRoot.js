@@ -162,7 +162,15 @@ ReactDOMHydrationRoot.prototype.unmount = ReactDOMRoot.prototype.unmount =
       unmarkContainerAsRoot(container);
     }
   };
-// 1：初始化函数调用
+/**
+ * 1:createRoot 入口函数
+ * 创建了一个FiberRootNode
+ * 绑定current为创建的FiberRoot
+ * 添加更新队列 updateQueue
+ * 添加了初始状态memoizedState
+ * 绑定了事件监听listenToAllSupportedEvents
+ * 返回了这个函数
+ */
 export function createRoot(
   container: Element | Document | DocumentFragment,
   options?: CreateRootOptions,
@@ -220,7 +228,9 @@ export function createRoot(
       transitionCallbacks = options.unstable_transitionCallbacks;
     }
   }
-// 2：创建容器
+  /**
+   * 1.1：创建容器
+   */
   const root = createContainer(
     container,
     ConcurrentRoot,
@@ -239,7 +249,7 @@ export function createRoot(
     !disableCommentsAsDOMContainers && container.nodeType === COMMENT_NODE
       ? (container.parentNode: any)
       : container;
-  // 为root创建事件监听
+  // 2.1 为 根元素 root 绑定事件
   listenToAllSupportedEvents(rootContainerElement);
 
   // $FlowFixMe[invalid-constructor] Flow no longer supports calling new on functions

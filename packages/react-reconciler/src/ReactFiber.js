@@ -132,7 +132,9 @@ if (__DEV__) {
     hasBadMapPolyfill = true;
   }
 }
-// 创建fiber对象
+/**
+ * 1.6：FiberNode创建fiber节点
+ */
 function FiberNode(
   this: $FlowFixMe,
   tag: WorkTag,
@@ -141,17 +143,17 @@ function FiberNode(
   mode: TypeOfMode,
 ) {
   // Instance
-  this.tag = tag;
+  this.tag = tag; // 节点类型 比如FunctionComponent | ClassComponent
   this.key = key;
   this.elementType = null;
   this.type = null;
   this.stateNode = null;
 
   // Fiber
-  this.return = null;
-  this.child = null;
-  this.sibling = null;
-  this.index = 0;
+  this.return = null; // 父节点的引用
+  this.child = null; // 子节点的引用
+  this.sibling = null; // 兄弟节点的引用
+  this.index = 0; // 在兄弟节点的位置
 
   this.ref = null;
   this.refCleanup = null;
@@ -221,6 +223,9 @@ function FiberNode(
 //    is faster.
 // 5) It should be easy to port this to a C struct and keep a C implementation
 //    compatible.
+/**
+ * 1.5：createFiberImplClass
+ */
 function createFiberImplClass(
   tag: WorkTag,
   pendingProps: mixed,

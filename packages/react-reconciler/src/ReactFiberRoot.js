@@ -44,7 +44,6 @@ export type RootState = {
   isDehydrated: boolean,
   cache: Cache,
 };
-// 4: 构造FiberRootNode
 function FiberRootNode(
   this: $FlowFixMe,
   containerInfo: any,
@@ -142,7 +141,6 @@ function FiberRootNode(
     }
   }
 }
-//3：创建根fiber
 export function createFiberRoot(
   containerInfo: Container,
   tag: RootTag,
@@ -174,6 +172,9 @@ export function createFiberRoot(
   formState: ReactFormState<any, any> | null,
 ): FiberRoot {
   // $FlowFixMe[invalid-constructor] Flow no longer supports calling new on functions
+  /**
+   * 1.3：创建根节点fiber对象
+   */
   const root: FiberRoot = (new FiberRootNode(
     containerInfo,
     tag,
@@ -194,7 +195,10 @@ export function createFiberRoot(
 
   // Cyclic construction. This cheats the type system right now because
   // stateNode is any.
-  // 5: 根据模式调用函数创建fiber
+  /**
+   * 1.4: createHostRootFiber
+   * 最终调用new FiberNode 得到一个fiber对象
+   */
   const uninitializedFiber = createHostRootFiber(tag, isStrictMode);
   root.current = uninitializedFiber;
   uninitializedFiber.stateNode = root;
@@ -216,8 +220,9 @@ export function createFiberRoot(
     isDehydrated: hydrate,
     cache: initialCache,
   };
+  // 记忆初始状态
   uninitializedFiber.memoizedState = initialState;
-
+  // 初始化更新队列，为fiber增加updateQueue属性
   initializeUpdateQueue(uninitializedFiber);
 
   return root;
